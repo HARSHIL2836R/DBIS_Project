@@ -1,0 +1,4 @@
+comment = 'Baseline FDW for scanning local parquet data lake files'
+default_version = '1.0'
+module_pathname = '$libdir/parquet_gsi_fdw'
+relocatable = true

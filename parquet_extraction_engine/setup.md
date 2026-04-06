@@ -15,9 +15,10 @@ To install the Apache Arrow and Parquet libraries, you can follow these steps:
         ```
         
 2. **If still there is some error**:
-    -- sudo apt-get install -y aptitude
-    -- sudo aptitude install -y libarrow-dev libparquet-dev   (this will show you to downgrade some packages, just select yes (the second time it asks))
-
+    ```bash
+    sudo apt-get install -y aptitude
+    sudo aptitude install -y libarrow-dev libparquet-dev   #(this will show you to downgrade some packages, just select yes (the second time it asks))
+    ```
 3. **Verify Installation**:
    - After installation, you can verify that the libraries are installed correctly by checking their versions:
      ```bash

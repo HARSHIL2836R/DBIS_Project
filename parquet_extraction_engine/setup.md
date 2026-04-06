@@ -1,44 +1,92 @@
-### Installing arrow and parquet libraries
-To install the Apache Arrow and Parquet libraries, you can follow these steps:
+# Setup Instructions
+
+## Installing Arrow and Parquet Libraries
+
+### macOS (using Homebrew)
+
+1. **Install Homebrew** if you do not already have it:
+   ```bash
+   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+   ```
+
+2. **Install Apache Arrow**:
+   ```bash
+   brew update
+   brew install apache-arrow
+   ```
+
+   Homebrew installs the Arrow libraries and Parquet support required by this project.
+
+3. **Verify the installation**:
+   ```bash
+   brew list | grep arrow
+   ```
+
+---
+
+### Linux (Ubuntu/Debian)
 
 1. **Install Apache Arrow and Parquet**:
-   - You can install Apache Arrow using package managers or by building from source. For example, on Ubuntu, you can use:
-     ```bash
-     sudo apt-get install libarrow-dev libparquet-dev
-     ```
-   - Alternatively, 
-        ```bash
-        wget https://apache.jfrog.io/artifactory/arrow/ubuntu/apache-arrow-apt-source-latest-noble.deb
-        sudo apt-get install -y ./apache-arrow-apt-source-latest-noble.deb
-        sudo apt-get update
-        sudo apt-get install -y libarrow-dev libparquet-dev
-        ```
-        
-2. **If still there is some error**:
+   ```bash
+   sudo apt-get install libarrow-dev libparquet-dev
+   ```
+
+   Or use the Apache Arrow package source:
+
+   ```bash
+   wget https://apache.jfrog.io/artifactory/arrow/ubuntu/apache-arrow-apt-source-latest-noble.deb
+   sudo apt-get install -y ./apache-arrow-apt-source-latest-noble.deb
+   sudo apt-get update
+   sudo apt-get install -y libarrow-dev libparquet-dev
+   ```
+
+2. **If you still get dependency issues**:
+   ```bash
+   sudo apt-get install -y aptitude
+   sudo aptitude install -y libarrow-dev libparquet-dev
+   ```
+
+3. **Verify installation**:
+   ```bash
+   dpkg -l | grep arrow
+   dpkg -l | grep parquet
+   ```
+
+---
+
+## Build and Run
+
+1. **Create a build directory**:
+   ```bash
+   mkdir build
+   cd build
+   ```
+
+2. **Configure and compile the project**:
+   ```bash
+   cmake ..
+   make
+   ```
+
+3. **Run the executable with appropriate input parameters**:
+   ```bash
+   ./extractor <target_parquet_file_path> <target_column_index>
+   ```
+
+4. **Cleaning the working directory**:
     ```bash
-    sudo apt-get install -y aptitude
-    sudo aptitude install -y libarrow-dev libparquet-dev   #(this will show you to downgrade some packages, just select yes (the second time it asks))
+    rm -rf build
+    rm Makefile
     ```
-3. **Verify Installation**:
-   - After installation, you can verify that the libraries are installed correctly by checking their versions:
-     ```bash
-     dpkg -l | grep arrow
-     dpkg -l | grep parquet
-     ```
 
-4. **How to run**
-    - make a directory for building the project using cmake
-        ```bash
-        mkdir build
-        cd build
-        cmake ..
-        make 
-        ```
-    - This will make the executable file (extractor) in the build directory. You can run it using:
-        ```bash
-        ./extractor
-        ```
+---
 
-### To change the indexing column 
-    - By default the target column (line 64 in main.cpp) is set to 0 (order_id). You can change it to any other column index as per your requirement. Just make sure to recompile the code after making changes.
-    - To get the index you can use the read_parquet.py file in the data directory to read the parquet file and check the column names and their corresponding indices. (change the file path in read_parquet.py to point to your parquet file and run it to see the column names and indices)
+## Finding Column Indices
+
+- Use the `read_parquet.py` script in the `data/` directory.
+- Update the file path inside the script to point to your parquet file.
+- Run:
+  ```bash
+  python3 read_parquet.py
+  ```
+- The script will print the column names and their corresponding indices.

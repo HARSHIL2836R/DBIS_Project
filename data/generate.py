@@ -18,7 +18,7 @@ import pyarrow.parquet as pq
 
 # ── CLI args (override defaults for quick testing) ─────────────────────────
 parser = argparse.ArgumentParser()
-parser.add_argument("--target", choices=["small","medium","large"], default="medium",
+parser.add_argument("--target", choices=["small","medium","large"], default="medium",   
                     help="small=~200MB  medium=~2GB  large=~10GB (default)")
 parser.add_argument("--out", default="./data_lake", help="Output directory")
 args = parser.parse_args()

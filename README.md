@@ -16,3 +16,6 @@ The percentage breakup of marks for this project are as follows: The project out
 
 Project Suggestions: [Sheet link](https://docs.google.com/spreadsheets/d/17ydn_P8w1HNvL46jceUBVjMp4oNc3FRuq7csnmtBA-g/edit?usp=sharing)
 
+
+sudo mount --bind /home/kunj/Desktop/DBIS-lab/DBIS_Project/data/data_lake /tmp/data_lake
+

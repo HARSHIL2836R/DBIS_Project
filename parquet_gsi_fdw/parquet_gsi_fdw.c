@@ -23,7 +23,7 @@
 PG_MODULE_MAGIC;
 
 #define PARQUET_GSI_OPTION_DATA_LAKE_PATH "data_lake_path"
-#define PARQUET_GSI_DEFAULT_DATA_LAKE_PATH "./data_lake"
+#define PARQUET_GSI_DEFAULT_DATA_LAKE_PATH "/tmp/data_lake"
 
 typedef struct ParquetGsiExecutionState
 {
@@ -53,6 +53,11 @@ static char *parquet_gsi_get_data_lake_path(Oid foreigntableid);
 static void parquet_gsi_collect_parquet_files(const char *dir_path, List **files_out);
 static bool parquet_gsi_has_parquet_suffix(const char *name);
 
+/*
+ * parquet_gsi_fdw_handler
+ * Entry point for the FDW. PostgreSQL calls this to get a struct of function 
+ * pointers (callback hooks) that define how to plan and execute queries on this FDW.
+ */
 Datum
 parquet_gsi_fdw_handler(PG_FUNCTION_ARGS)
 {
@@ -69,6 +74,11 @@ parquet_gsi_fdw_handler(PG_FUNCTION_ARGS)
     PG_RETURN_POINTER(fdw_routine);
 }
 
+/*
+ * parquet_gsi_fdw_validator
+ * Validates the OPTIONS provided when a user runs CREATE SERVER or CREATE FOREIGN TABLE.
+ * It ensures the user only passes valid keys (like "data_lake_path").
+ */
 Datum
 parquet_gsi_fdw_validator(PG_FUNCTION_ARGS)
 {
@@ -91,12 +101,22 @@ parquet_gsi_fdw_validator(PG_FUNCTION_ARGS)
     PG_RETURN_VOID();
 }
 
+/*
+ * parquet_gsi_get_foreign_rel_size
+ * Planner Phase 1: Estimates the number of rows and total size of the foreign table.
+ * Currently hardcoded to 1000 rows as a baseline estimate.
+ */
 static void
 parquet_gsi_get_foreign_rel_size(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntableid)
 {
     baserel->rows = 1000;
 }
 
+/*
+ * parquet_gsi_get_foreign_paths
+ * Planner Phase 2: Generates the possible execution paths (e.g., sequential scan) 
+ * and calculates their expected startup and total execution costs.
+ */
 static void
 parquet_gsi_get_foreign_paths(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntableid)
 {
@@ -106,18 +126,21 @@ parquet_gsi_get_foreign_paths(PlannerInfo *root, RelOptInfo *baserel, Oid foreig
     add_path(baserel,
              (Path *) create_foreignscan_path(root,
                                               baserel,
-                                              NULL,
-                                              baserel->rows,
-                                              0,
-                                              startup_cost,
-                                              total_cost,
-                                              NIL,
-                                              NULL,
-                                              NULL,
-                                              NIL,
-                                              NIL));
+                                              NULL,           
+                                              baserel->rows,  
+                                              startup_cost,   
+                                              total_cost,     
+                                              NIL,            
+                                              NULL,           
+                                              NULL,           /* fdw_outerpath */
+                                              NIL));          
 }
 
+/*
+ * parquet_gsi_get_foreign_plan
+ * Planner Phase 3: Takes the best path chosen by the optimizer and builds 
+ * the actual execution plan node (ForeignScan) containing the target list and query clauses.
+ */
 static ForeignScan *
 parquet_gsi_get_foreign_plan(PlannerInfo *root,
                              RelOptInfo *baserel,
@@ -139,6 +162,11 @@ parquet_gsi_get_foreign_plan(PlannerInfo *root,
                             outer_plan);
 }
 
+/*
+ * parquet_gsi_begin_foreign_scan
+ * Execution Phase 1: Runs once before the scan starts. Used to initialize state, 
+ * allocate memory contexts, and in this case, find all Parquet files in the target directory.
+ */
 static void
 parquet_gsi_begin_foreign_scan(ForeignScanState *node, int eflags)
 {
@@ -163,6 +191,12 @@ parquet_gsi_begin_foreign_scan(ForeignScanState *node, int eflags)
     node->fdw_state = (void *) state;
 }
 
+/*
+ * parquet_gsi_iterate_foreign_scan
+ * Execution Phase 2: Called repeatedly by the executor to fetch the next row.
+ * Currently, it iterates through the collected files and returns the file path 
+ * as the first column, filling the rest with NULLs.
+ */
 static TupleTableSlot *
 parquet_gsi_iterate_foreign_scan(ForeignScanState *node)
 {
@@ -174,7 +208,7 @@ parquet_gsi_iterate_foreign_scan(ForeignScanState *node)
     ExecClearTuple(slot);
 
     if (state == NULL || state->next_file == NULL)
-        return slot;
+        return slot; // A NULL return signals that all rows have been scanned
 
     if (natts > 0)
     {
@@ -196,6 +230,11 @@ parquet_gsi_iterate_foreign_scan(ForeignScanState *node)
     return slot;
 }
 
+/*
+ * parquet_gsi_rescan_foreign_scan
+ * Execution Utility: Called if PostgreSQL needs to restart the scan from the beginning 
+ * (e.g., during nested loop joins). Resets the file pointer to the head of the list.
+ */
 static void
 parquet_gsi_rescan_foreign_scan(ForeignScanState *node)
 {
@@ -205,6 +244,11 @@ parquet_gsi_rescan_foreign_scan(ForeignScanState *node)
         state->next_file = list_head(state->files);
 }
 
+/*
+ * parquet_gsi_end_foreign_scan
+ * Execution Phase 3: Cleans up when the scan is entirely finished.
+ * Frees the memory context and the execution state struct to prevent memory leaks.
+ */
 static void
 parquet_gsi_end_foreign_scan(ForeignScanState *node)
 {
@@ -220,6 +264,11 @@ parquet_gsi_end_foreign_scan(ForeignScanState *node)
     node->fdw_state = NULL;
 }
 
+/*
+ * parquet_gsi_get_data_lake_path
+ * Helper Function: Extracts the "data_lake_path" string from the OPTIONS
+ * defined on the foreign table or foreign server. Falls back to a default if missing.
+ */
 static char *
 parquet_gsi_get_data_lake_path(Oid foreigntableid)
 {
@@ -239,6 +288,11 @@ parquet_gsi_get_data_lake_path(Oid foreigntableid)
     return pstrdup(PARQUET_GSI_DEFAULT_DATA_LAKE_PATH);
 }
 
+/*
+ * parquet_gsi_collect_parquet_files
+ * Helper Function: Recursively traverses a given directory path, looks for files, 
+ * and appends the absolute paths of any .parquet files to the files_out list.
+ */
 static void
 parquet_gsi_collect_parquet_files(const char *dir_path, List **files_out)
 {
@@ -278,6 +332,11 @@ parquet_gsi_collect_parquet_files(const char *dir_path, List **files_out)
     FreeDir(dir);
 }
 
+/*
+ * parquet_gsi_has_parquet_suffix
+ * Helper Function: Simply checks if a given file name ends with the ".parquet" string,
+ * ignoring case differences.
+ */
 static bool
 parquet_gsi_has_parquet_suffix(const char *name)
 {

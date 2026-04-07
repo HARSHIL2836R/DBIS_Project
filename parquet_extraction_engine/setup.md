@@ -40,17 +40,18 @@
    sudo apt-get install -y libarrow-dev libparquet-dev
    ```
 
-2. **If you still get dependency issues**:
+2. **Verify installation**:
+   ```bash
+   dpkg -l | grep arrow
+   dpkg -l | grep parquet
+   ```
+
+3. **If you still get dependency issues**:
    ```bash
    sudo apt-get install -y aptitude
    sudo aptitude install -y libarrow-dev libparquet-dev
    ```
 
-3. **Verify installation**:
-   ```bash
-   dpkg -l | grep arrow
-   dpkg -l | grep parquet
-   ```
 
 ---
 

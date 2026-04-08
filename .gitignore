@@ -1,2 +1,6 @@
 dbis-env
 data/data_lake
+*.bc
+*.control
+*.o
+*.so

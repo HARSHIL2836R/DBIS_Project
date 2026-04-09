@@ -8,3 +8,4 @@ parquet_gsi_fdw/fdw_explanation.md
 *.control
 *.o
 *.so
+.gitignore

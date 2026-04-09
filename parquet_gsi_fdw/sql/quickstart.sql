@@ -12,7 +12,7 @@ DROP FOREIGN TABLE IF EXISTS transactions;
 -- Products: (product_id, name, category, price, stock, brand, weight_kg, rating, reviews)
 -- Transactions: (order_id, customer_id, product_id, amount, quantity, status, region, timestamp, payment_method, is_returned, warehouse_id, shipping_days)
 CREATE FOREIGN TABLE customers (
-    customer_id INT,
+    customer_id VARCHAR(32),
     email VARCHAR(255),
     region VARCHAR(100),
     age INT,
@@ -25,7 +25,7 @@ SERVER parquet_gsi_server
 OPTIONS (data_lake_path '/tmp/data_lake/customers/');
 
 CREATE FOREIGN TABLE products (
-    product_id INT,
+    product_id VARCHAR(32),
     name VARCHAR(255),
     category VARCHAR(100),
     price DECIMAL(10, 2),
@@ -39,9 +39,9 @@ SERVER parquet_gsi_server
 OPTIONS (data_lake_path '/tmp/data_lake/products/');
 
 CREATE FOREIGN TABLE transactions (
-    order_id INT,
-    customer_id INT,
-    product_id INT,
+    order_id VARCHAR(32),
+    customer_id VARCHAR(32),
+    product_id VARCHAR(32),
     amount DECIMAL(10, 2),
     quantity INT,
     status VARCHAR(50),

@@ -1,6 +1,12 @@
 dbis-env
 data/data_lake
+Checkpoint1/.vscode
+data/data_lake
+parquet_extraction_engine/build
+parquet_gsi_fdw/fdw_explanation.md
+data/read_parquet.py
 *.bc
 *.control
 *.o
 *.so
+.gitignore

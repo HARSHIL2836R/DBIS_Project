@@ -10,7 +10,7 @@
 
 void extract_index_coordinates(const std::string& file_path, int target_col_idx) {
     try {
-        // 2.2 File I/O: Open the target file
+        // File I/O: Open the target file
         std::ofstream outfile("extracted_coordinates.txt");
         std::shared_ptr<arrow::io::ReadableFile> infile;
         PARQUET_ASSIGN_OR_THROW(infile, arrow::io::ReadableFile::Open(file_path));
@@ -23,7 +23,7 @@ void extract_index_coordinates(const std::string& file_path, int target_col_idx)
         std::cout << "Successfully opened: " << file_path << "\n";
         std::cout << "Total Row Groups to process: " << num_row_groups << "\n\n";
 
-        // 2.3 & 2.4: Isolate coordinates (Row Group ID and Values)
+        // Isolate coordinates (Row Group ID and Values)
         for (int row_group_id = 0; row_group_id < num_row_groups; ++row_group_id) {
             
             std::shared_ptr<parquet::RowGroupReader> rg_reader = reader->RowGroup(row_group_id);
@@ -54,7 +54,7 @@ void extract_index_coordinates(const std::string& file_path, int target_col_idx)
     }
 }
 
-// ---> THIS IS THE PART THE COMPILER WAS MISSING <---
+
 int main(int argc, char** argv) {
     if (argc < 3) {
         std::cerr << "Usage: ./extractor <path_to_parquet_file> <target_column_index>\n";

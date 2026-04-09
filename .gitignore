@@ -10,3 +10,4 @@ data/read_parquet.py
 *.o
 *.so
 .gitignore
+/parquet_extraction_engine/comment.cpp

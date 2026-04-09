@@ -8,9 +8,9 @@ OPTIONS (data_lake_path '/tmp/data_lake');
 DROP FOREIGN TABLE IF EXISTS customers;
 DROP FOREIGN TABLE IF EXISTS products;
 DROP FOREIGN TABLE IF EXISTS transactions;
---  Customers: (customer_id, email, region, age, loyalty_tier, signup_date, total_orders, lifetime_value)
--- # Products: (product_id, name, category, price, stock, brand, weight_kg, rating, reviews)
--- #Transactions: (order_id, customer_id, product_id, amount, quantity, status, region, timestamp, payment_method, is_returned, warehouse_id, shipping_days)
+-- Customers: (customer_id, email, region, age, loyalty_tier, signup_date, total_orders, lifetime_value)
+-- Products: (product_id, name, category, price, stock, brand, weight_kg, rating, reviews)
+-- Transactions: (order_id, customer_id, product_id, amount, quantity, status, region, timestamp, payment_method, is_returned, warehouse_id, shipping_days)
 CREATE FOREIGN TABLE customers (
     customer_id INT,
     email VARCHAR(255),

@@ -1,8 +1,10 @@
 """
-Data generation script for synthetic e-commerce dataset. Creates a data lake with three main tables:
-1. Customers: (customer_id, email, region, age, loyalty_tier, signup_date, total_orders, lifetime_value)
-2. Products: (product_id, name, category, price, stock, brand, weight_kg, rating, reviews)
-3. Transactions: (order_id, customer_id, product_id, amount, quantity, status, region, timestamp, payment_method, is_returned, warehouse_id, shipping_days)
+This script Creates a data lake with three main tables:
+    1. Customers: (customer_id, email, region, age, loyalty_tier, 
+                    signup_date, total_orders, lifetime_value)
+    2. Products: (product_id, name, category, price, stock, brand, weight_kg, rating, reviews)
+    3. Transactions: (order_id, customer_id, product_id, amount, quantity, status, region, 
+                        timestamp, payment_method, is_returned, warehouse_id, shipping_days)
 """
 
 import os
@@ -16,7 +18,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-# ── CLI args (override defaults for quick testing) ─────────────────────────
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--target", choices=["small","medium","large"], default="medium",   
                     help="small=~200MB  medium=~2GB  large=~10GB (default)")
@@ -38,7 +40,7 @@ CHUNK_DIM     = 100_000          # chunk size for customers & products
 ROW_GROUP     = 100_000          # Parquet row group size
 DATA_LAKE_DIR = args.out
 
-REGIONS   = ["us-east", "us-west", "eu-central", "ap-south", "ap-east"]
+REGIONS   = ["Gujarat", "Maharashtra", "Rajasthan", "Punjab", "Tamil Nadu", "West Bengal"]
 STATUSES  = ["completed", "pending", "refunded", "failed", "processing"]
 PAYMENTS  = ["credit_card", "debit_card", "paypal", "crypto", "upi"]
 LOYALTY   = ["bronze", "silver", "gold", "platinum"]
@@ -53,12 +55,12 @@ print(f"  Customers    : {NUM_CUSTOMERS:>12,} rows")
 print(f"  Products     : {NUM_PRODUCTS:>12,} rows")
 print(f"  Transactions : {NUM_TX:>12,} rows")
 
-# ── Setup dirs ─────────────────────────────────────────────────────────────
+
 for sub in ["customers", "products", "transactions"]:
     os.makedirs(f"{DATA_LAKE_DIR}/{sub}", exist_ok=True)
 
 
-# ── Helpers ─────────────────────────────────────────────────────────────────
+# -- Helper functions --------------------------------------------------------------
 def rand_ts(n: int) -> np.ndarray:
     base = np.datetime64("2023-01-01")
     off  = np.random.randint(0, 730 * 86400, n).astype("timedelta64[s]")
@@ -82,7 +84,7 @@ def id_pool(n: int) -> np.ndarray:
     return np.array([r.tobytes().hex() for r in raw])
 
 
-# ── 1. Customers ─────────────────────────────────────────────────────────────
+# -- Customers ----------------------------------------------------------------------
 print(f"\n[1/3] Generating {NUM_CUSTOMERS:,} customers ...")
 t0  = time.time()
 all_cids = id_pool(NUM_CUSTOMERS)
@@ -105,10 +107,10 @@ for ci, start in enumerate(range(0, NUM_CUSTOMERS, CHUNK_DIM)):
     if ci % 10 == 0 or end == NUM_CUSTOMERS:
         print(f"  chunk {ci:04d}/{(NUM_CUSTOMERS-1)//CHUNK_DIM:04d}  {human_size(path)}")
 
-print(f"  ✓ Done in {time.time()-t0:.1f}s")
+print(f"Done ")
 
 
-# ── 2. Products ───────────────────────────────────────────────────────────────
+# -- Products -----------------------------------------------------------------------
 print(f"\n[2/3] Generating {NUM_PRODUCTS:,} products ...")
 t0   = time.time()
 all_pids = id_pool(NUM_PRODUCTS)
@@ -135,7 +137,7 @@ for ci, start in enumerate(range(0, NUM_PRODUCTS, CHUNK_DIM)):
 print(f"  ✓ Done in {time.time()-t0:.1f}s")
 
 
-# ── 3. Transactions ───────────────────────────────────────────────────────────
+# -- Transactions ----------------------------------------------------------------------
 print(f"\n[3/3] Generating {NUM_TX:,} transactions ...")
 total_chunks = (NUM_TX + CHUNK_TX - 1) // CHUNK_TX
 t0 = time.time()
@@ -168,10 +170,10 @@ for ci, start in enumerate(range(0, NUM_TX, CHUNK_TX)):
     print(f"  chunk {ci:04d}/{total_chunks-1:04d}  {done_pct:5.1f}%  "
           f"{human_size(path)}  speed={rows_ps/1e6:.2f}M rows/s  ETA={eta:.0f}s")
 
-print(f"  ✓ Done in {time.time()-t0:.1f}s")
+print(f"Done")
 
 
-# ── Summary ────────────────────────────────────────────────────────────────
+# -- Summary ---------------------------------------------------------------------------
 print("\n" + "="*65)
 print("DATA LAKE SUMMARY")
 print("="*65)

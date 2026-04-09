@@ -24,7 +24,7 @@ void extract_index_coordinates(const std::string& file_path, int target_col_idx)
         std::cout << "Total Row Groups to process: " << num_row_groups << "\n\n";
 
         // Isolate coordinates (Row Group ID and Values)
-        for (int row_group_id = 0; row_group_id < num_row_groups; ++row_group_id) {
+        for (int row_group_id = 0; row_group_id < num_row_groups; row_group_id++) {
             
             std::shared_ptr<parquet::RowGroupReader> rg_reader = reader->RowGroup(row_group_id);
             std::shared_ptr<parquet::ColumnReader> col_reader = rg_reader->Column(target_col_idx);

@@ -38,7 +38,7 @@ typedef struct ParquetGsiExecutionState
 PG_FUNCTION_INFO_V1(parquet_gsi_fdw_handler);
 PG_FUNCTION_INFO_V1(parquet_gsi_fdw_validator);
 /*
-This macro call is not needed for internal-language functions, since PostgreSQL assumes that all internal functions use the version-1 convention. It is, however, required for dynamically-loaded functions.
+* This macro call is not needed for internal-language functions, since PostgreSQL assumes that all internal functions use the version-1 convention. It is, however, required for dynamically-loaded functions.
 */
 
 static void parquet_gsi_get_foreign_rel_size(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntableid);
@@ -62,7 +62,6 @@ static bool parquet_gsi_has_parquet_suffix(const char *name);
 /*
 * Entry point for the FDW. PostgreSQL calls this to get a struct of function 
 * pointers (callback hooks) that define how to plan and execute queries on this FDW.
-
 * headers expect the function's arguments to be supplied as Datums, and likewise they return Datum.
 */
 Datum parquet_gsi_fdw_handler(PG_FUNCTION_ARGS)
@@ -97,8 +96,8 @@ Datum parquet_gsi_fdw_validator(PG_FUNCTION_ARGS)
         {
             ereport(ERROR,
                     (errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
-                     errmsg("invalid option \"%s\"", option->defname),
-                     errhint("Valid option: %s", PARQUET_GSI_OPTION_DATA_LAKE_PATH)));
+                    errmsg("invalid option \"%s\"", option->defname),
+                    errhint("Valid option: %s", PARQUET_GSI_OPTION_DATA_LAKE_PATH)));
         }
     }
 
@@ -242,8 +241,7 @@ static void parquet_gsi_rescan_foreign_scan(ForeignScanState *node)
 * Execution Phase 3: Cleans up when the scan is entirely finished.
 * Frees the memory context and the execution state struct to prevent memory leaks.
 */
-static void
-parquet_gsi_end_foreign_scan(ForeignScanState *node)
+static void parquet_gsi_end_foreign_scan(ForeignScanState *node)
 {
     ParquetGsiExecutionState *state = (ParquetGsiExecutionState *) node->fdw_state;
 

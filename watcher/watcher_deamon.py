@@ -51,7 +51,7 @@ def initialize_database():
         
         cur.close()
         conn.close()
-        print("✓ Database schema initialized successfully.")
+        print("Database schema initialized successfully.")
     except Exception as e:
         print(f"Database Initialization Error: {e}")
 
@@ -105,7 +105,7 @@ def trigger_extraction_engine(file_path):
                 conn.commit()
                 cur.close()
                 conn.close()
-                print(f"✓ Successfully ingested {len(records)} coordinates into PostgreSQL!")
+                print(f"Successfully ingested {len(records)} coordinates into PostgreSQL!")
 
             # 4. Clean up the text file
             os.remove(coords_file)
@@ -148,7 +148,7 @@ class DataLakeHandler(FileSystemEventHandler):
                 conn.close()
                 
                 if deleted_count > 0:
-                    print(f"✓ Cleaned up {deleted_count} stale records for deleted file.")
+                    print(f"Cleaned up {deleted_count} stale records for deleted file.")
             except Exception as e:
                 print(f"X Database Cleanup Error: {e}")
 

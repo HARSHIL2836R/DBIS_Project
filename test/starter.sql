@@ -160,8 +160,10 @@ CREATE TABLE IF NOT EXISTS gsi_customers_age (
     parquet_file_path text,
     rowgroup_id int,
     indexed_val int   -- Matches the type of the 'age' column
+    primary key (indexed_val,parquet_file_path, rowgroup_id)
 );
+
 -- Insert a dummy payload to prove it works
 INSERT INTO gsi_customers_age VALUES ('/tmp/data_lake/customers/customers_chunk_0000.parquet', 0, 30);
 -- Now run the explain
-EXPLAIN SELECT * FROM public.customers WHERE age = 30;
+EXPLAIN SELECT * FROM public.customers WHERE age=30;

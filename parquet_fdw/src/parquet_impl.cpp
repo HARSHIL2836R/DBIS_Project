@@ -118,10 +118,6 @@ struct ParquetFdwPlanState {
       *usable_gsi_attrs; // list of attributes that can be used for global index
   List *gsi_filenames;   // list of filenames for global index
   List *gsi_rowgroups;   // list of rowgroups for global index
-  // uint64      gsi_matched_rows; // number of rows matched by global index
-  // uint64      gsi_starup_cost; // startup cost of global index (GSI lookup,
-  // etc.) uint64      gsi_run_cost; // run cost of global index (actually
-  // scanning the selected files/rowgroups)
 };
 
 static int get_strategy(Oid type, Oid opno, Oid am) {
@@ -1591,6 +1587,17 @@ extern "C" void parquetBeginForeignScan(ForeignScanState *node,
             Node *left = (Node *)linitial(op->args);
             Node *right = (Node *)lsecond(op->args);
 
+            if (IsA(left, RelabelType))
+              left = (Node *)((RelabelType *)left)->arg;
+            if (IsA(right, RelabelType))
+              right = (Node *)((RelabelType *)right)->arg;
+
+            if (IsA(left, Const) && IsA(right, Var)) {
+              Node *tmp = left;
+              left = right;
+              right = tmp;
+            }
+
             // Check if the left side is the Column (Var) and right side is a
             // Value (Const) or vice versa
             if (IsA(left, Var) && IsA(right, Const)) {
@@ -1609,6 +1616,9 @@ extern "C" void parquetBeginForeignScan(ForeignScanState *node,
       }
       /*query if got the WHERE clause*/
       if (found_qual) {
+        elog(DEBUG1,
+             "Parquet FDW Executor: Found WHERE clause for GSI B+ Tree: %s",
+             index_table_name);
         Oid argtypes[1] = {filter_type};
         Datum values[1] = {filter_value};
         char nulls[1] = {' '}; // space means "not null"
@@ -1664,6 +1674,12 @@ extern "C" void parquetBeginForeignScan(ForeignScanState *node,
               MemoryContextSwitchTo(spi_cxt);
             }
           }
+
+          // Hack: Overwrite the immutable Plan lists directly so EXPLAIN prints
+          // what we found!
+          lfirst(list_head(fdw_private)) = filenames;
+          lfirst(list_nth_cell(fdw_private, 7)) = rowgroups_list;
+
           elog(DEBUG1,
                "Parquet FDW Executor: GSI query extracted %ld specific chunks!",
                SPI_processed);
@@ -1898,8 +1914,8 @@ extern "C" void parquetExplainForeignScan(ForeignScanState *node,
   rowgroups_list = (List *)list_nth(fdw_private, 7);
 
   if (list_length(fdw_private) > 8 && (bool)intVal(list_nth(fdw_private, 8))) {
-    ExplainPropertyText("Global Secondary Index",
-                        "Active (B+ Tree Filter)", es);
+    ExplainPropertyText("Global Secondary Index", "Active (B+ Tree Filter)",
+                        es);
   } /////////////////////////////////////// print GSI on EXPLAIN if CHOSEN.
 
   switch (reader_type) {

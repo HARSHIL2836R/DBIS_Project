@@ -1,151 +1,935 @@
+from __future__ import annotations
+
 import os
 import time
-import subprocess
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from queue import Empty, Queue
+from typing import Any
+
 import psycopg2
-import re
-import threading
-from watchdog.observers import Observer
+from psycopg2 import sql
+from psycopg2.extras import DictCursor, execute_values
 from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
+
 from extractor import extract_index_coordinates
-# --- Configuration via Environment Variables ---
-DATA_LAKE_DIR = os.environ.get("DATA_LAKE_DIR", "./data_lake")
-TARGET_COLUMN = os.environ.get("TARGET_COLUMN", "0")
+
+
+def load_env_file() -> None:
+    env_path = Path(__file__).with_name(".env")
+
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text().splitlines():
+        line = raw_line.strip()
+
+        if not line or line.startswith("#"):
+            continue
+
+        if line.startswith("export "):
+            line = line[len("export ") :]
+
+        if "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+load_env_file()
+
+
+def normalize_path(path: str) -> str:
+    return os.path.realpath(os.path.abspath(path))
+
+
+def utc_datetime_from_timestamp(timestamp: float) -> datetime:
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+
+
+WATCHER_LOOP_INTERVAL = float(os.environ.get("WATCHER_LOOP_INTERVAL", "1.0"))
+REGISTRY_REFRESH_SECONDS = int(os.environ.get("REGISTRY_REFRESH_SECONDS", "60"))
+RECONCILE_SECONDS = int(os.environ.get("RECONCILE_SECONDS", "300"))
+FILE_STABLE_SECONDS = float(os.environ.get("FILE_STABLE_SECONDS", "2.0"))
 
 DB_PARAMS = {
     "dbname": os.environ.get("DB_NAME", "postgres"),
-    "user":   os.environ.get("DB_USER", "postgres"),
+    "user": os.environ.get("DB_USER", "postgres"),
     "password": os.environ.get("DB_PASSWORD", "password"),
-    "host":   os.environ.get("DB_HOST", "localhost"),
-    "port":   os.environ.get("DB_PORT", "5432")
+    "host": os.environ.get("DB_HOST", "localhost"),
+    "port": os.environ.get("DB_PORT", "5432"),
 }
 
-# Lock to prevent race conditions during DB writes
-process_lock = threading.Lock()
 
-# =====================================================================
-# Subtask 3.3: GSI Schema Design
-# =====================================================================
-def initialize_database():
-    """Connects to PostgreSQL and initializes the global_index B-Tree schema."""
-    print("Initializing PostgreSQL GSI schema...")
-    try:
-        conn = psycopg2.connect(**DB_PARAMS)
-        cur = conn.cursor()
-        
-        create_table_query = """
-        CREATE TABLE IF NOT EXISTS global_index (
-            indexed_value VARCHAR,
-            file_path TEXT,
-            row_group_id INT
-        );
-        """
-        create_index_query = """
-        CREATE INDEX IF NOT EXISTS idx_global_value 
-        ON global_index USING btree (indexed_value);
-        """
-        
-        cur.execute(create_table_query)
-        cur.execute(create_index_query)
-        conn.commit()
-        
-        cur.close()
-        conn.close()
-        print("Database schema initialized successfully.")
-    except Exception as e:
-        print(f"Database Initialization Error: {e}")
+@dataclass(frozen=True)
+class IndexConfig:
+    index_name: str
+    foreigntable_oid: int
+    table_name: str
+    column_name: str
+    column_type: str
+    storage_table: str
+    data_lake_path: str
+    status: str
 
-# =====================================================================
-# Subtask 3.2 & 3.4: Pipeline Hand-off & Index Upsertion
-# =====================================================================
-def trigger_extraction_engine(file_path):
-    """Runs extraction in memory and safely inserts into PostgreSQL."""
-    with process_lock:
-        print(f"\n---> Hand-off triggered for: {file_path}")
-        
-        try:
-            # 1. Call the Python function directly! No subprocess, no disk I/O.
-            # Convert TARGET_COLUMN string to int
-            records = extract_index_coordinates(file_path, int(TARGET_COLUMN))
-            
-            # 2. Database Updates (Cleanup + Insert)
-            if records:
-                conn = psycopg2.connect(**DB_PARAMS)
-                cur = conn.cursor()
-                
-                # Clean old records to prevent duplication
-                cur.execute("DELETE FROM global_index WHERE file_path = %s;", (file_path,))
-                deleted = cur.rowcount
-                if deleted > 0:
-                    print(f"  -> Cleaned {deleted} old records to prevent duplication.")
-                
-                # Insert new records directly from the list of tuples
-                insert_query = "INSERT INTO global_index (indexed_value, file_path, row_group_id) VALUES (%s, %s, %s)"
-                cur.executemany(insert_query, records)
-                
-                conn.commit()
-                cur.close()
-                conn.close()
-                print(f"Successfully ingested {len(records)} coordinates into PostgreSQL!")
-            else:
-                print(f"No valid records found to ingest for {file_path}")
-                
-        except Exception as e:
-            print(f"X Database or Extraction Error: {e}")
 
-# =====================================================================
-# Subtask 3.1: Directory Polling
-# =====================================================================
+@dataclass(frozen=True)
+class FileEvent:
+    kind: str
+    path: str
+
+
+@dataclass
+class PendingFile:
+    reason: str
+    last_signature: tuple[int, int] | None = None
+    stable_since: float | None = None
+
+
+@dataclass
+class WatcherState:
+    observer: Observer
+    handler: FileSystemEventHandler
+    event_queue: Queue[FileEvent] = field(default_factory=Queue)
+    pending_files: dict[str, PendingFile] = field(default_factory=dict)
+    active_configs: dict[str, IndexConfig] = field(default_factory=dict)
+    configs_by_root: dict[str, list[IndexConfig]] = field(default_factory=dict)
+    watch_handles: dict[str, Any] = field(default_factory=dict)
+
+
 class DataLakeHandler(FileSystemEventHandler):
-    
-    def on_created(self, event):
-        if not event.is_directory and event.src_path.endswith(".parquet"):
-            trigger_extraction_engine(event.src_path)
+    def __init__(self, event_queue: Queue[FileEvent]) -> None:
+        super().__init__()
+        self.event_queue = event_queue
 
-    def on_moved(self, event):
-        if not event.is_directory and event.dest_path.endswith(".parquet"):
-            trigger_extraction_engine(event.dest_path)
+    def _queue_event(self, kind: str, path: str) -> None:
+        if path.endswith(".parquet"):
+            self.event_queue.put(FileEvent(kind=kind, path=normalize_path(path)))
 
-    # --- NEW: Handle manual file deletions ---
-    def on_deleted(self, event):
-        if not event.is_directory and event.src_path.endswith(".parquet"):
-            print(f"\nEvent: IN_DELETE detected -> {event.src_path}")
-            self.remove_stale_index(event.src_path)
+    def on_created(self, event) -> None:
+        if not event.is_directory:
+            self._queue_event("upsert", event.src_path)
 
-    def remove_stale_index(self, file_path):
-        """Deletes all PostgreSQL index records associated with a removed file."""
-        with process_lock:
-            try:
-                conn = psycopg2.connect(**DB_PARAMS)
-                cur = conn.cursor()
-                cur.execute("DELETE FROM global_index WHERE file_path = %s;", (file_path,))
-                deleted_count = cur.rowcount
-                conn.commit()
-                cur.close()
-                conn.close()
-                
-                if deleted_count > 0:
-                    print(f"Cleaned up {deleted_count} stale records for deleted file.")
-            except Exception as e:
-                print(f"X Database Cleanup Error: {e}")
+    def on_modified(self, event) -> None:
+        if not event.is_directory:
+            self._queue_event("upsert", event.src_path)
 
-def start_watcher():
-    os.makedirs(DATA_LAKE_DIR, exist_ok=True)
-    event_handler = DataLakeHandler()
+    def on_moved(self, event) -> None:
+        if event.is_directory:
+            return
+
+        self._queue_event("delete", event.src_path)
+        self._queue_event("upsert", event.dest_path)
+
+    def on_deleted(self, event) -> None:
+        if not event.is_directory:
+            self._queue_event("delete", event.src_path)
+
+
+def get_connection():
+    return psycopg2.connect(**DB_PARAMS)
+
+
+def table_identifier(table_name: str) -> sql.Identifier:
+    if "." in table_name:
+        schema_name, relation_name = table_name.split(".", 1)
+        return sql.Identifier(schema_name, relation_name)
+
+    return sql.Identifier(table_name)
+
+
+def fetch_registry_rows(conn, statuses: tuple[str, ...]) -> list[dict]:
+    with conn.cursor(cursor_factory=DictCursor) as cur:
+        cur.execute(
+            """
+            SELECT index_name,
+                   foreigntable_oid,
+                   table_name,
+                   column_name,
+                   column_type::text AS column_type,
+                   storage_table,
+                   data_lake_path,
+                   status
+              FROM public.gsi_registry
+             WHERE status = ANY(%s)
+             ORDER BY index_name
+            """,
+            (list(statuses),),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+
+def index_config_from_row(row: dict) -> IndexConfig:
+    return IndexConfig(
+        index_name=row["index_name"],
+        foreigntable_oid=row["foreigntable_oid"],
+        table_name=row["table_name"],
+        column_name=row["column_name"],
+        column_type=row["column_type"],
+        storage_table=row["storage_table"],
+        data_lake_path=normalize_path(row["data_lake_path"]),
+        status=row["status"],
+    )
+
+
+def resolve_configs_for_path(state: WatcherState, file_path: str) -> list[IndexConfig]:
+    file_path = normalize_path(file_path)
+    matched_root = None
+
+    for root in state.configs_by_root:
+        try:
+            if os.path.commonpath([file_path, root]) == root:
+                if matched_root is None or len(root) > len(matched_root):
+                    matched_root = root
+        except ValueError:
+            continue
+
+    if matched_root is None:
+        return []
+
+    return state.configs_by_root[matched_root]
+
+
+def schedule_file(state: WatcherState, file_path: str, reason: str) -> None:
+    if not resolve_configs_for_path(state, file_path):
+        return
+
+    pending = state.pending_files.get(file_path)
+
+    if pending is None:
+        state.pending_files[file_path] = PendingFile(reason=reason)
+        return
+
+    pending.reason = reason
+    pending.last_signature = None
+    pending.stable_since = None
+
+
+def queue_paths_from_db(conn, state: WatcherState) -> None:
+    active_index_names = sorted(state.active_configs)
+
+    if not active_index_names:
+        return
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT fc.file_path
+              FROM public.gsi_file_catalog fc
+              JOIN public.gsi_index_file_state s
+                ON s.file_id = fc.file_id
+             WHERE fc.is_active
+               AND s.index_name = ANY(%s)
+               AND s.status IN ('pending', 'indexing', 'failed')
+            """,
+            (active_index_names,),
+        )
+
+        for (file_path,) in cur.fetchall():
+            schedule_file(state, normalize_path(file_path), "db-pending")
+
+
+def sync_observer_paths(state: WatcherState) -> None:
+    active_roots = set(state.configs_by_root)
+
+    for root in sorted(active_roots - set(state.watch_handles)):
+        os.makedirs(root, exist_ok=True)
+        state.watch_handles[root] = state.observer.schedule(state.handler, root, recursive=True)
+        print(f"Watching parquet root: {root}")
+
+    for root in sorted(set(state.watch_handles) - active_roots):
+        state.observer.unschedule(state.watch_handles.pop(root))
+        print(f"Stopped watching parquet root: {root}")
+
+
+def ensure_runtime_metadata(conn) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT to_regclass('public.gsi_registry'),
+                   to_regclass('public.gsi_file_catalog'),
+                   to_regclass('public.gsi_index_file_state')
+            """
+        )
+        registry_table, file_catalog_table, index_state_table = cur.fetchone()
+
+    if not all([registry_table, file_catalog_table, index_state_table]):
+        raise RuntimeError(
+            "Required GSI tables are missing. Run test/starter.sql before starting the watcher."
+        )
+
+
+def requeue_inflight_states(conn) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE public.gsi_index_file_state
+               SET status = 'pending',
+                   last_error = 'Watcher restarted before indexing completed'
+             WHERE status = 'indexing'
+            """
+        )
+
+    conn.commit()
+
+
+def handle_dropping_indexes(conn) -> None:
+    dropping_rows = fetch_registry_rows(conn, ("dropping",))
+
+    if not dropping_rows:
+        return
+
+    with conn.cursor() as cur:
+        for row in dropping_rows:
+            config = index_config_from_row(row)
+            print(f"Dropping index payload for {config.index_name}")
+
+            cur.execute(
+                sql.SQL("DELETE FROM {}").format(table_identifier(config.storage_table))
+            )
+            cur.execute(
+                "DELETE FROM public.gsi_index_file_state WHERE index_name = %s",
+                (config.index_name,),
+            )
+            cur.execute(
+                """
+                UPDATE public.gsi_registry
+                   SET status = 'dropped',
+                       last_synced_at = now()
+                 WHERE index_name = %s
+                """,
+                (config.index_name,),
+            )
+
+    conn.commit()
+
+
+def load_active_registry(conn, state: WatcherState) -> None:
+    registry_rows = fetch_registry_rows(conn, ("building", "ready"))
+    state.active_configs = {
+        row["index_name"]: index_config_from_row(row) for row in registry_rows
+    }
+
+    configs_by_root: dict[str, list[IndexConfig]] = {}
+
+    for config in state.active_configs.values():
+        configs_by_root.setdefault(config.data_lake_path, []).append(config)
+
+    state.configs_by_root = {
+        root: sorted(configs, key=lambda item: item.index_name)
+        for root, configs in configs_by_root.items()
+    }
+
+    for file_path in list(state.pending_files):
+        if not resolve_configs_for_path(state, file_path):
+            state.pending_files.pop(file_path, None)
+
+
+def list_parquet_files(root: str) -> list[str]:
+    parquet_files = []
+
+    for current_root, _, names in os.walk(root):
+        for name in names:
+            if name.endswith(".parquet"):
+                parquet_files.append(normalize_path(os.path.join(current_root, name)))
+
+    parquet_files.sort()
+    return parquet_files
+
+
+def ensure_file_catalog_entry(conn, config: IndexConfig, file_path: str, stat_result) -> tuple[int, bool]:
+    file_mtime = utc_datetime_from_timestamp(stat_result.st_mtime)
+
+    with conn.cursor(cursor_factory=DictCursor) as cur:
+        cur.execute(
+            """
+            SELECT file_id,
+                   file_size,
+                   extract(epoch from file_mtime) AS file_mtime_epoch,
+                   is_active
+              FROM public.gsi_file_catalog
+             WHERE file_path = %s
+            """,
+            (file_path,),
+        )
+        row = cur.fetchone()
+
+        if row is None:
+            cur.execute(
+                """
+                INSERT INTO public.gsi_file_catalog (
+                    foreigntable_oid,
+                    table_name,
+                    data_lake_path,
+                    file_path,
+                    file_size,
+                    file_mtime,
+                    is_active,
+                    last_seen_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, true, now())
+                RETURNING file_id
+                """,
+                (
+                    config.foreigntable_oid,
+                    config.table_name,
+                    config.data_lake_path,
+                    file_path,
+                    stat_result.st_size,
+                    file_mtime,
+                ),
+            )
+            return cur.fetchone()[0], True
+
+        previous_mtime = float(row["file_mtime_epoch"])
+        changed = (
+            row["file_size"] != stat_result.st_size
+            or abs(previous_mtime - stat_result.st_mtime) > 0.000001
+            or not row["is_active"]
+        )
+
+        cur.execute(
+            """
+            UPDATE public.gsi_file_catalog
+               SET foreigntable_oid = %s,
+                   table_name = %s,
+                   data_lake_path = %s,
+                   file_size = %s,
+                   file_mtime = %s,
+                   is_active = true,
+                   last_seen_at = now()
+             WHERE file_id = %s
+            """,
+            (
+                config.foreigntable_oid,
+                config.table_name,
+                config.data_lake_path,
+                stat_result.st_size,
+                file_mtime,
+                row["file_id"],
+            ),
+        )
+        return row["file_id"], changed
+
+
+def ensure_index_states_for_file(
+    conn,
+    file_id: int,
+    configs: list[IndexConfig],
+    force_pending: bool,
+) -> list[IndexConfig]:
+    if not configs:
+        return []
+
+    index_names = [config.index_name for config in configs]
+
+    with conn.cursor(cursor_factory=DictCursor) as cur:
+        cur.execute(
+            """
+            SELECT index_name, status
+              FROM public.gsi_index_file_state
+             WHERE file_id = %s
+               AND index_name = ANY(%s)
+            """,
+            (file_id, index_names),
+        )
+        existing_states = {row["index_name"]: row["status"] for row in cur.fetchall()}
+
+        pending_configs = []
+
+        for config in configs:
+            current_status = existing_states.get(config.index_name)
+
+            if current_status is None:
+                cur.execute(
+                    """
+                    INSERT INTO public.gsi_index_file_state (
+                        index_name,
+                        file_id,
+                        status,
+                        last_error
+                    )
+                    VALUES (%s, %s, 'pending', NULL)
+                    """,
+                    (config.index_name, file_id),
+                )
+                pending_configs.append(config)
+                continue
+
+            if force_pending or current_status in {"failed", "deleted"}:
+                cur.execute(
+                    """
+                    UPDATE public.gsi_index_file_state
+                       SET status = 'pending',
+                           last_error = NULL
+                     WHERE index_name = %s
+                       AND file_id = %s
+                    """,
+                    (config.index_name, file_id),
+                )
+                pending_configs.append(config)
+                continue
+
+            if current_status == "pending":
+                pending_configs.append(config)
+
+        if pending_configs:
+            cur.execute(
+                """
+                UPDATE public.gsi_registry
+                   SET status = 'building'
+                 WHERE index_name = ANY(%s)
+                   AND status NOT IN ('dropping', 'dropped')
+                """,
+                ([config.index_name for config in pending_configs],),
+            )
+
+    return pending_configs
+
+
+def mark_index_states(conn, configs: list[IndexConfig], file_id: int, status: str, error: str | None = None) -> None:
+    if not configs:
+        return
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE public.gsi_index_file_state
+               SET status = %s,
+                   last_error = %s,
+                   last_indexed_at = CASE WHEN %s = 'indexed' THEN now() ELSE last_indexed_at END
+             WHERE file_id = %s
+               AND index_name = ANY(%s)
+            """,
+            (status, error, status, file_id, [config.index_name for config in configs]),
+        )
+
+
+def rewrite_index_entries(cur, config: IndexConfig, file_id: int, postings: list[dict]) -> None:
+    stage_table_name = f"tmp_{config.index_name}_stage"
+    stage_identifier = sql.Identifier(stage_table_name)
+    storage_identifier = table_identifier(config.storage_table)
+
+    cur.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(stage_identifier))
+    cur.execute(
+        sql.SQL(
+            "CREATE TEMP TABLE {} (LIKE {} INCLUDING DEFAULTS) ON COMMIT DROP"
+        ).format(stage_identifier, storage_identifier)
+    )
+
+    if postings:
+        query = sql.SQL(
+            "INSERT INTO {} (indexed_val, file_id, rowgroup_ids) VALUES %s"
+        ).format(stage_identifier)
+        values = [
+            (posting["value"], file_id, list(posting["rowgroup_ids"]))
+            for posting in postings
+        ]
+        execute_values(cur, query.as_string(cur.connection), values)
+
+    cur.execute(
+        sql.SQL("DELETE FROM {} WHERE file_id = %s").format(storage_identifier),
+        (file_id,),
+    )
+    cur.execute(
+        sql.SQL(
+            """
+            INSERT INTO {} (indexed_val, file_id, rowgroup_ids)
+            SELECT indexed_val, file_id, rowgroup_ids
+              FROM {}
+            """
+        ).format(storage_identifier, stage_identifier)
+    )
+
+
+def advance_registry_statuses(conn, configs: list[IndexConfig]) -> None:
+    unique_configs = {config.index_name: config for config in configs}
+
+    with conn.cursor() as cur:
+        for config in unique_configs.values():
+            cur.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                      FROM public.gsi_file_catalog fc
+                      LEFT JOIN public.gsi_index_file_state s
+                        ON s.file_id = fc.file_id
+                       AND s.index_name = %s
+                     WHERE fc.foreigntable_oid = %s
+                       AND fc.is_active
+                       AND COALESCE(s.status, 'pending') <> 'indexed'
+                )
+                """,
+                (config.index_name, config.foreigntable_oid),
+            )
+            has_outstanding_work = cur.fetchone()[0]
+
+            cur.execute(
+                """
+                UPDATE public.gsi_registry
+                   SET status = CASE
+                       WHEN %s THEN 'building'
+                       ELSE 'ready'
+                   END,
+                       last_synced_at = CASE
+                           WHEN %s THEN last_synced_at
+                           ELSE now()
+                       END
+                 WHERE index_name = %s
+                   AND status NOT IN ('dropping', 'dropped')
+                """,
+                (has_outstanding_work, has_outstanding_work, config.index_name),
+            )
+
+
+def cleanup_deleted_file(conn, file_path: str) -> None:
+    with conn.cursor(cursor_factory=DictCursor) as cur:
+        cur.execute(
+            """
+            SELECT fc.file_id,
+                   gr.index_name,
+                   gr.storage_table,
+                   gr.foreigntable_oid
+              FROM public.gsi_file_catalog fc
+              LEFT JOIN public.gsi_index_file_state s
+                ON s.file_id = fc.file_id
+              LEFT JOIN public.gsi_registry gr
+                ON gr.index_name = s.index_name
+             WHERE fc.file_path = %s
+            """,
+            (file_path,),
+        )
+        rows = cur.fetchall()
+
+        if not rows:
+            return
+
+        file_id = rows[0]["file_id"]
+        configs = []
+
+        cur.execute(
+            """
+            UPDATE public.gsi_file_catalog
+               SET is_active = false,
+                   last_seen_at = now()
+             WHERE file_id = %s
+            """,
+            (file_id,),
+        )
+
+        for row in rows:
+            if row["index_name"] is None or row["storage_table"] is None:
+                continue
+
+            configs.append(
+                IndexConfig(
+                    index_name=row["index_name"],
+                    foreigntable_oid=row["foreigntable_oid"],
+                    table_name="",
+                    column_name="",
+                    column_type="",
+                    storage_table=row["storage_table"],
+                    data_lake_path="",
+                    status="",
+                )
+            )
+            cur.execute(
+                sql.SQL("DELETE FROM {} WHERE file_id = %s").format(
+                    table_identifier(row["storage_table"])
+                ),
+                (file_id,),
+            )
+            cur.execute(
+                """
+                UPDATE public.gsi_index_file_state
+                   SET status = 'deleted',
+                       last_error = NULL
+                 WHERE index_name = %s
+                   AND file_id = %s
+                """,
+                (row["index_name"], file_id),
+            )
+
+    if configs:
+        advance_registry_statuses(conn, configs)
+
+
+def reconcile_root(conn, state: WatcherState, root: str, configs: list[IndexConfig]) -> None:
+    primary_config = configs[0]
+    actual_files = {}
+
+    for path in list_parquet_files(root):
+        try:
+            actual_files[path] = os.stat(path)
+        except FileNotFoundError:
+            continue
+
+    with conn.cursor(cursor_factory=DictCursor) as cur:
+        cur.execute(
+            """
+            SELECT file_id,
+                   file_path,
+                   file_size,
+                   extract(epoch from file_mtime) AS file_mtime_epoch,
+                   is_active
+              FROM public.gsi_file_catalog
+             WHERE foreigntable_oid = %s
+               AND data_lake_path = %s
+            """,
+            (primary_config.foreigntable_oid, root),
+        )
+        existing_rows = {row["file_path"]: row for row in cur.fetchall()}
+
+    touched_configs: list[IndexConfig] = []
+
+    for file_path, stat_result in actual_files.items():
+        file_id, file_changed = ensure_file_catalog_entry(conn, primary_config, file_path, stat_result)
+        pending_configs = ensure_index_states_for_file(conn, file_id, configs, file_changed)
+
+        if pending_configs:
+            touched_configs.extend(pending_configs)
+            schedule_file(state, file_path, "bootstrap")
+
+        existing_rows.pop(file_path, None)
+
+    for file_path, row in existing_rows.items():
+        if row["is_active"]:
+            cleanup_deleted_file(conn, file_path)
+
+    if touched_configs:
+        advance_registry_statuses(conn, touched_configs)
+
+    conn.commit()
+
+
+def refresh_registry(state: WatcherState) -> None:
+    with get_connection() as conn:
+        ensure_runtime_metadata(conn)
+        handle_dropping_indexes(conn)
+        load_active_registry(conn, state)
+        sync_observer_paths(state)
+
+        for configs in state.configs_by_root.values():
+            for config in configs:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO public.gsi_index_file_state (index_name, file_id, status)
+                        SELECT %s, fc.file_id, CASE
+                            WHEN fc.is_active THEN 'pending'
+                            ELSE 'deleted'
+                        END
+                          FROM public.gsi_file_catalog fc
+                         WHERE fc.foreigntable_oid = %s
+                        ON CONFLICT (index_name, file_id) DO NOTHING
+                        """,
+                        (config.index_name, config.foreigntable_oid),
+                    )
+            conn.commit()
+
+        if state.active_configs:
+            advance_registry_statuses(conn, list(state.active_configs.values()))
+            conn.commit()
+
+        queue_paths_from_db(conn, state)
+
+
+def reconcile_all_paths(state: WatcherState) -> None:
+    if not state.configs_by_root:
+        return
+
+    with get_connection() as conn:
+        for root, configs in state.configs_by_root.items():
+            print(f"Reconciling parquet root: {root}")
+            reconcile_root(conn, state, root, configs)
+
+
+def handle_delete_event(state: WatcherState, file_path: str) -> None:
+    state.pending_files.pop(file_path, None)
+
+    with get_connection() as conn:
+        cleanup_deleted_file(conn, file_path)
+        conn.commit()
+
+    print(f"Removed stale GSI rows for deleted parquet file: {file_path}")
+
+
+def drain_event_queue(state: WatcherState) -> None:
+    while True:
+        try:
+            event = state.event_queue.get_nowait()
+        except Empty:
+            break
+
+        if event.kind == "delete":
+            handle_delete_event(state, event.path)
+            continue
+
+        schedule_file(state, event.path, event.kind)
+
+
+def process_file(state: WatcherState, file_path: str) -> None:
+    configs = resolve_configs_for_path(state, file_path)
+
+    if not configs:
+        state.pending_files.pop(file_path, None)
+        return
+
+    try:
+        stat_result = os.stat(file_path)
+    except FileNotFoundError:
+        state.pending_files.pop(file_path, None)
+        handle_delete_event(state, file_path)
+        return
+
+    primary_config = configs[0]
+
+    with get_connection() as conn:
+        file_id, file_changed = ensure_file_catalog_entry(conn, primary_config, file_path, stat_result)
+        pending_configs = ensure_index_states_for_file(conn, file_id, configs, file_changed)
+
+        if not pending_configs:
+            conn.commit()
+            state.pending_files.pop(file_path, None)
+            return
+
+        mark_index_states(conn, pending_configs, file_id, "indexing")
+        conn.commit()
+
+    target_columns = sorted({config.column_name for config in pending_configs})
+
+    try:
+        extracted_by_column = extract_index_coordinates(file_path, target_columns)
+    except Exception as exc:
+        error_message = str(exc)
+
+        with get_connection() as conn:
+            mark_index_states(conn, pending_configs, file_id, "failed", error_message)
+            advance_registry_statuses(conn, pending_configs)
+            conn.commit()
+
+        print(f"Index extraction failed for {file_path}: {error_message}")
+        state.pending_files.pop(file_path, None)
+        return
+
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                for config in pending_configs:
+                    postings = extracted_by_column.get(config.column_name, [])
+                    rewrite_index_entries(cur, config, file_id, postings)
+
+                mark_index_states(conn, pending_configs, file_id, "indexed")
+                cur.execute(
+                    """
+                    UPDATE public.gsi_file_catalog
+                       SET file_size = %s,
+                           file_mtime = %s,
+                           is_active = true,
+                           last_seen_at = now()
+                     WHERE file_id = %s
+                    """,
+                    (
+                        stat_result.st_size,
+                        utc_datetime_from_timestamp(stat_result.st_mtime),
+                        file_id,
+                    ),
+                )
+                advance_registry_statuses(conn, pending_configs)
+            conn.commit()
+
+        print(
+            f"Indexed {file_path} into {', '.join(config.index_name for config in pending_configs)}"
+        )
+    except Exception as exc:
+        error_message = str(exc)
+
+        with get_connection() as conn:
+            mark_index_states(conn, pending_configs, file_id, "failed", error_message)
+            advance_registry_statuses(conn, pending_configs)
+            conn.commit()
+
+        print(f"PostgreSQL GSI write failed for {file_path}: {error_message}")
+
+    state.pending_files.pop(file_path, None)
+
+
+def process_stable_files(state: WatcherState) -> None:
+    now = time.time()
+    ready_paths = []
+
+    for file_path, pending in list(state.pending_files.items()):
+        try:
+            stat_result = os.stat(file_path)
+        except FileNotFoundError:
+            state.pending_files.pop(file_path, None)
+            handle_delete_event(state, file_path)
+            continue
+
+        signature = (stat_result.st_size, stat_result.st_mtime_ns)
+
+        if pending.last_signature != signature:
+            pending.last_signature = signature
+            pending.stable_since = now
+            continue
+
+        if pending.stable_since is None:
+            pending.stable_since = now
+            continue
+
+        if now - pending.stable_since >= FILE_STABLE_SECONDS:
+            ready_paths.append(file_path)
+
+    for file_path in sorted(ready_paths):
+        process_file(state, file_path)
+
+
+def start_watcher() -> None:
     observer = Observer()
-    observer.schedule(event_handler, DATA_LAKE_DIR, recursive=True)
+    state = WatcherState(
+        observer=observer,
+        handler=DataLakeHandler(event_queue=Queue()),
+    )
+    state.event_queue = state.handler.event_queue
+
+    with get_connection() as conn:
+        ensure_runtime_metadata(conn)
+        requeue_inflight_states(conn)
+
+    refresh_registry(state)
+    reconcile_all_paths(state)
     observer.start()
-    
-    print(f"Watcher Daemon actively polling '{DATA_LAKE_DIR}'...\n(Press Ctrl+C to stop)")
-    
+
+    print("Watcher daemon started.")
+
+    next_registry_refresh = time.time() + REGISTRY_REFRESH_SECONDS
+    next_reconcile = time.time() + RECONCILE_SECONDS
+
     try:
         while True:
-            time.sleep(1)
+            drain_event_queue(state)
+            process_stable_files(state)
+
+            now = time.time()
+
+            if now >= next_registry_refresh:
+                refresh_registry(state)
+                next_registry_refresh = now + REGISTRY_REFRESH_SECONDS
+
+            if now >= next_reconcile:
+                reconcile_all_paths(state)
+                next_reconcile = now + RECONCILE_SECONDS
+
+            time.sleep(WATCHER_LOOP_INTERVAL)
     except KeyboardInterrupt:
+        print("Watcher daemon stopped gracefully.")
+    finally:
         observer.stop()
-        print("\nWatcher Daemon stopped gracefully.")
-    
-    observer.join()
+        observer.join()
+
 
 if __name__ == "__main__":
-    initialize_database()
     start_watcher()

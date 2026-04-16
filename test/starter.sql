@@ -23,7 +23,9 @@ BEGIN
         full_path := dir || '/' || entry;
         stat := pg_stat_file(full_path, true);
 
-        IF stat.isdir THEN
+        IF stat IS NULL THEN
+            CONTINUE;
+        ELSIF stat.isdir THEN
             files := files || list_parquet_files_recursive_jsonb(
                 jsonb_build_object('dir', full_path)
             );
@@ -143,27 +145,139 @@ BEGIN
 END;
 $$;
 
--- 2. Create the GSI Metadata Catalog 
-CREATE TABLE IF NOT EXISTS parquet_gsi_catalog (
-    foreigntable_oid oid,
-    table_name text,
-    column_name text
+CREATE TABLE IF NOT EXISTS public.gsi_registry (
+    index_name text PRIMARY KEY,
+    foreigntable_oid oid NOT NULL,
+    table_name text NOT NULL,
+    column_name text NOT NULL,
+    column_type regtype NOT NULL,
+    storage_table text NOT NULL,
+    data_lake_path text NOT NULL,
+    status text NOT NULL DEFAULT 'building'
+        CHECK (status IN ('building', 'ready', 'dropping', 'dropped', 'failed')),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    last_synced_at timestamptz
 );
 
--- 3. Register a dummy GSI for the customers table on the 'age' column
-DELETE FROM parquet_gsi_catalog WHERE foreigntable_oid = 'public.customers'::regclass::oid;
+CREATE UNIQUE INDEX IF NOT EXISTS gsi_registry_table_column_key
+ON public.gsi_registry (foreigntable_oid, column_name);
 
-INSERT INTO parquet_gsi_catalog (foreigntable_oid, table_name, column_name)
-VALUES ('public.customers'::regclass::oid, 'gsi_customers_age', 'age');
-
-CREATE TABLE IF NOT EXISTS gsi_customers_age (
-    parquet_file_path text,
-    rowgroup_id int,
-    indexed_val int,   -- Matches the type of the 'age' column
-    primary key (indexed_val,parquet_file_path, rowgroup_id)
+CREATE TABLE IF NOT EXISTS public.gsi_file_catalog (
+    file_id bigserial PRIMARY KEY,
+    foreigntable_oid oid NOT NULL,
+    table_name text NOT NULL,
+    data_lake_path text NOT NULL,
+    file_path text NOT NULL UNIQUE,
+    file_size bigint NOT NULL,
+    file_mtime timestamptz NOT NULL,
+    is_active boolean NOT NULL DEFAULT true,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    last_seen_at timestamptz NOT NULL DEFAULT now()
 );
 
--- Insert a dummy payload to prove it works
-INSERT INTO gsi_customers_age VALUES ('/tmp/data_lake/customers/customers_chunk_0000.parquet', 0, 30);
--- Now run the explain
-EXPLAIN SELECT * FROM public.customers WHERE age=30;
+CREATE INDEX IF NOT EXISTS gsi_file_catalog_table_active_idx
+ON public.gsi_file_catalog (foreigntable_oid, is_active);
+
+CREATE TABLE IF NOT EXISTS public.gsi_index_file_state (
+    index_name text NOT NULL REFERENCES public.gsi_registry(index_name) ON DELETE CASCADE,
+    file_id bigint NOT NULL REFERENCES public.gsi_file_catalog(file_id) ON DELETE CASCADE,
+    status text NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'indexing', 'indexed', 'failed', 'deleted')),
+    last_indexed_at timestamptz,
+    last_error text,
+    PRIMARY KEY (index_name, file_id)
+);
+
+CREATE INDEX IF NOT EXISTS gsi_index_file_state_status_idx
+ON public.gsi_index_file_state (index_name, status);
+
+CREATE OR REPLACE FUNCTION public.register_gsi(
+    foreign_table regclass,
+    index_name text,
+    column_name text,
+    data_lake_path text
+)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    target_type regtype;
+    target_table text;
+BEGIN
+    SELECT a.atttypid::regtype,
+           c.relname
+      INTO target_type,
+           target_table
+      FROM pg_attribute a
+      JOIN pg_class c
+        ON c.oid = a.attrelid
+     WHERE a.attrelid = foreign_table
+       AND a.attname = column_name
+       AND a.attnum > 0
+       AND NOT a.attisdropped;
+
+    IF target_type IS NULL THEN
+        RAISE EXCEPTION 'column % does not exist on %', column_name, foreign_table::text;
+    END IF;
+
+    EXECUTE format(
+        'CREATE TABLE IF NOT EXISTS public.%I (
+            indexed_val %s NOT NULL,
+            file_id bigint NOT NULL REFERENCES public.gsi_file_catalog(file_id) ON DELETE CASCADE,
+            rowgroup_ids int[] NOT NULL,
+            PRIMARY KEY (indexed_val, file_id)
+        )',
+        index_name,
+        target_type::text
+    );
+
+    EXECUTE format(
+        'CREATE INDEX IF NOT EXISTS %I ON public.%I (file_id)',
+        index_name || '_file_id_idx',
+        index_name
+    );
+
+    INSERT INTO public.gsi_registry (
+        index_name,
+        foreigntable_oid,
+        table_name,
+        column_name,
+        column_type,
+        storage_table,
+        data_lake_path,
+        status
+    )
+    VALUES (
+        index_name,
+        foreign_table::oid,
+        target_table,
+        column_name,
+        target_type,
+        index_name,
+        data_lake_path,
+        'building'
+    )
+    ON CONFLICT (index_name) DO UPDATE
+        SET foreigntable_oid = EXCLUDED.foreigntable_oid,
+            table_name = EXCLUDED.table_name,
+            column_name = EXCLUDED.column_name,
+            column_type = EXCLUDED.column_type,
+            storage_table = EXCLUDED.storage_table,
+            data_lake_path = EXCLUDED.data_lake_path,
+            status = CASE
+                WHEN public.gsi_registry.status = 'dropping' THEN 'dropping'
+                ELSE 'building'
+            END;
+END;
+$$;
+
+SELECT public.register_gsi(
+    'public.customers'::regclass,
+    'gsi_customers_age',
+    'age',
+    '/tmp/data_lake/customers'
+);
+
+SELECT index_name, table_name, column_name, status
+FROM public.gsi_registry
+ORDER BY index_name;

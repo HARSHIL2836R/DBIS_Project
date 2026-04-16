@@ -1,63 +1,70 @@
-import pyarrow.parquet as pq
 from collections import defaultdict
 
-def extract_index_coordinates(file_path: str, target_col_idx: int) -> list:
-    grouped_data = defaultdict(set)
-    
-    try:
-        parquet_file = pq.ParquetFile(file_path)
-        schema = parquet_file.schema
-        
-        if target_col_idx < 0 or target_col_idx >= len(schema.names):
-            raise ValueError(f"Column index {target_col_idx} is out of bounds.")
-            
-        target_col_name = schema.names[target_col_idx]
-        num_row_groups = parquet_file.metadata.num_row_groups
+import pyarrow.parquet as pq
 
-        for row_group_id in range(num_row_groups):
-            table = parquet_file.read_row_group(row_group_id, columns=[target_col_name])
-            column_data = table.column(0)
-            
-            for val in column_data:
-                if val.is_valid:
-                    native_val = val.as_py()
-                    
-                    if isinstance(native_val, bool):
-                        str_val = "true" if native_val else "false"
-                    elif isinstance(native_val, bytes):
-                        str_val = native_val.decode('utf-8')
-                    else:
-                        str_val = str(native_val)
-                        
-                    # Add the row group ID to this value's set
-                    grouped_data[str_val].add(row_group_id)
 
-        # Convert the dictionary into your exact requested JSON-like list
-        # We sort the set into a list so the row group IDs are in order: [0, 2]
-        records = [
-            {"value": val, "file_path": file_path, "rowgroup_ids": sorted(list(rg_ids))}
-            for val, rg_ids in grouped_data.items()
+def _normalize_value(value):
+    if isinstance(value, bytearray):
+        return bytes(value)
+
+    if isinstance(value, memoryview):
+        return value.tobytes()
+
+    return value
+
+
+def extract_index_coordinates(file_path: str, target_columns: list[str]) -> dict[str, list[dict]]:
+    """
+    Read one parquet file and return rowgroup-level postings for each indexed column.
+
+    Returned shape:
+    {
+        "age": [
+            {"value": 30, "rowgroup_ids": [0, 2]},
+            {"value": 45, "rowgroup_ids": [1]}
+        ],
+        "region": [
+            {"value": "Gujarat", "rowgroup_ids": [0, 1]}
         ]
-        
-        return records
+    }
+    """
+    if not target_columns:
+        return {}
 
-    except Exception as e:
-        print(f"Parquet Extraction Error: {e}")
-        return []
+    parquet_file = pq.ParquetFile(file_path)
+    schema_names = set(parquet_file.schema.names)
+    missing_columns = [column for column in target_columns if column not in schema_names]
 
+    if missing_columns:
+        raise ValueError(
+            f"Columns {missing_columns} are not present in parquet file {file_path}"
+        )
 
-#manually checking
+    grouped_data: dict[str, defaultdict] = {
+        column: defaultdict(set) for column in target_columns
+    }
 
-# if __name__ == "__main__":
-#     #take file path and column index as input
-#     import argparse
-#     parser = argparse.ArgumentParser(description="Extract index coordinates from a Parquet file.")
-#     parser.add_argument("file_path", type=str, help="Path to the Parquet file")
-#     parser.add_argument("column_index", type=int, help="Column index to extract")
-#     args = parser.parse_args()
+    for row_group_id in range(parquet_file.metadata.num_row_groups):
+        row_group = parquet_file.read_row_group(row_group_id, columns=target_columns)
 
-#     #call the function and print the results
-#     extracted_records = extract_index_coordinates(args.file_path, args.column_index)
-#     print(f"Extracted {len(extracted_records)} records:")
-#     for record in extracted_records[:10]:  # Print only the first 10 records for brevity
-#         print(record)
+        for column_index, column_name in enumerate(row_group.column_names):
+            column_data = row_group.column(column_index)
+
+            for scalar in column_data:
+                if not scalar.is_valid:
+                    continue
+
+                grouped_data[column_name][_normalize_value(scalar.as_py())].add(row_group_id)
+
+    extracted: dict[str, list[dict]] = {}
+
+    for column_name, values in grouped_data.items():
+        extracted[column_name] = [
+            {
+                "value": value,
+                "rowgroup_ids": sorted(rowgroup_ids),
+            }
+            for value, rowgroup_ids in values.items()
+        ]
+
+    return extracted

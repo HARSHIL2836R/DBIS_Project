@@ -60,7 +60,7 @@ void extract_index_coordinates(const std::string& file_path, int target_col_idx)
             std::shared_ptr<parquet::ColumnReader> col_reader = rg_reader->Column(target_col_idx);
 
             parquet::Type::type col_type = col_reader->descr()->physical_type();
-
+            // std::cout<<"Processing Row Group " << row_group_id << " with Column Type: " << parquet::TypeToString(col_type) << "\n";
             switch (col_type) {
                 case parquet::Type::BOOLEAN: // Added Boolean case
                     process_column_chunk<parquet::BoolReader, bool>(col_reader.get(), outfile, file_path, row_group_id);

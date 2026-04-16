@@ -191,11 +191,13 @@ CREATE TABLE IF NOT EXISTS public.gsi_index_file_state (
 CREATE INDEX IF NOT EXISTS gsi_index_file_state_status_idx
 ON public.gsi_index_file_state (index_name, status);
 
+DROP FUNCTION IF EXISTS public.register_gsi(regclass, text, text, text);
+
 CREATE OR REPLACE FUNCTION public.register_gsi(
     foreign_table regclass,
-    index_name text,
-    column_name text,
-    data_lake_path text
+    p_index_name text,
+    p_column_name text,
+    p_data_lake_path text
 )
 RETURNS void
 LANGUAGE plpgsql
@@ -212,12 +214,12 @@ BEGIN
       JOIN pg_class c
         ON c.oid = a.attrelid
      WHERE a.attrelid = foreign_table
-       AND a.attname = column_name
+       AND a.attname = p_column_name
        AND a.attnum > 0
        AND NOT a.attisdropped;
 
     IF target_type IS NULL THEN
-        RAISE EXCEPTION 'column % does not exist on %', column_name, foreign_table::text;
+        RAISE EXCEPTION 'column % does not exist on %', p_column_name, foreign_table::text;
     END IF;
 
     EXECUTE format(
@@ -227,14 +229,14 @@ BEGIN
             rowgroup_ids int[] NOT NULL,
             PRIMARY KEY (indexed_val, file_id)
         )',
-        index_name,
+        p_index_name,
         target_type::text
     );
 
     EXECUTE format(
         'CREATE INDEX IF NOT EXISTS %I ON public.%I (file_id)',
-        index_name || '_file_id_idx',
-        index_name
+        p_index_name || '_file_id_idx',
+        p_index_name
     );
 
     INSERT INTO public.gsi_registry (
@@ -248,13 +250,13 @@ BEGIN
         status
     )
     VALUES (
-        index_name,
+        p_index_name,
         foreign_table::oid,
         target_table,
-        column_name,
+        p_column_name,
         target_type,
-        index_name,
-        data_lake_path,
+        p_index_name,
+        p_data_lake_path,
         'building'
     )
     ON CONFLICT (index_name) DO UPDATE

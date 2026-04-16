@@ -106,7 +106,7 @@ for ci, start in enumerate(range(0, NUM_CUSTOMERS, CHUNK_DIM)):
         "customer_id":  all_cids[start:end],
         "email":        [f"user_{start+i}@example.com" for i in range(n)],
         "region":       np.random.choice(REGIONS, n),
-        "age":          np.random.randint(18, 80, n).astype(np.int32),
+        "age":          np.random.randint(18+ci, 80-ci, n).astype(np.int32),
         "loyalty_tier": np.random.choice(LOYALTY, n),
         "signup_date":  rand_date(n),
         "total_orders": np.random.randint(0, 500, n).astype(np.int32),

@@ -34,7 +34,7 @@ exc_palloc(std::size_t size)
 
 	context->isReset = false;
 
-	ret = context->methods->alloc(context, size, 0);
+	ret = context->methods->alloc(context, size);
 	if (unlikely(ret == NULL))
 		throw std::bad_alloc();
 

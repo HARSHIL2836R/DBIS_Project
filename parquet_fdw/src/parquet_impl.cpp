@@ -49,6 +49,7 @@ extern "C"
 #include "parser/parse_func.h"
 #include "parser/parse_oper.h"
 #include "utils/builtins.h"
+#include "utils/array.h"
 #include "utils/jsonb.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -190,100 +191,6 @@ static bool extract_gsi_filter_from_clauses(List *clauses, AttrNumber index_attn
   }
 
   return false;
-}
-
-static void populate_gsi_scan_targets(ParquetFdwPlanState *fdw_private,
-                                      List *clauses,
-                                      bool clauses_are_restrictinfo)
-{
-  List *gsi_pair;
-  char *index_table_name;
-  AttrNumber index_attnum;
-  Datum filter_value = 0;
-  Oid filter_type = InvalidOid;
-  MemoryContext oldcxt = CurrentMemoryContext;
-
-  fdw_private->gsi_filenames = NIL;
-  fdw_private->gsi_rowgroups = NIL;
-
-  if (!fdw_private->is_gsi || fdw_private->usable_gsi_attrs == NIL)
-    return;
-
-  gsi_pair = (List *)linitial(fdw_private->usable_gsi_attrs);
-  index_table_name = strVal(linitial(gsi_pair));
-  index_attnum = (AttrNumber)intVal(lsecond(gsi_pair));
-
-  if (!extract_gsi_filter_from_clauses(clauses, index_attnum,
-                                       clauses_are_restrictinfo, &filter_value,
-                                       &filter_type))
-    return;
-
-  if (SPI_connect() == SPI_OK_CONNECT)
-  {
-    Oid argtypes[1] = {filter_type};
-    Datum values[1] = {filter_value};
-    char nulls[1] = {' '};
-    StringInfoData query;
-    int ret;
-
-    initStringInfo(&query);
-    appendStringInfo(&query,
-                     "SELECT parquet_file_path, rowgroup_id FROM %s WHERE "
-                     "indexed_val = $1",
-                     quote_identifier(index_table_name));
-
-    ret = SPI_execute_with_args(query.data, 1, argtypes, values, nulls, true, 0);
-
-    if (ret > 0 && SPI_processed > 0)
-    {
-      for (uint64 row = 0; row < SPI_processed; row++)
-      {
-        bool isNullFile, isNullRg;
-        Datum file_datum = SPI_getbinval(SPI_tuptable->vals[row],
-                                         SPI_tuptable->tupdesc, 1, &isNullFile);
-        Datum rg_datum = SPI_getbinval(SPI_tuptable->vals[row],
-                                       SPI_tuptable->tupdesc, 2, &isNullRg);
-
-        if (!isNullFile && !isNullRg)
-        {
-          char *file_str = TextDatumGetCString(file_datum);
-          int32 rg_id = DatumGetInt32(rg_datum);
-          MemoryContext spi_cxt = MemoryContextSwitchTo(oldcxt);
-          int file_idx = -1;
-          int cur_idx = 0;
-          ListCell *lc_file;
-
-          foreach (lc_file, fdw_private->gsi_filenames)
-          {
-            if (strcmp(strVal(lfirst(lc_file)), file_str) == 0)
-            {
-              file_idx = cur_idx;
-              break;
-            }
-            cur_idx++;
-          }
-
-          if (file_idx == -1)
-          {
-            fdw_private->gsi_filenames =
-                lappend(fdw_private->gsi_filenames, makeString(pstrdup(file_str)));
-            fdw_private->gsi_rowgroups =
-                lappend(fdw_private->gsi_rowgroups, list_make1_int(rg_id));
-          }
-          else
-          {
-            ListCell *lc_rg = list_nth_cell(fdw_private->gsi_rowgroups, file_idx);
-            List *existing_rgs = (List *)lfirst(lc_rg);
-            lfirst(lc_rg) = lappend_int(existing_rgs, rg_id);
-          }
-
-          MemoryContextSwitchTo(spi_cxt);
-        }
-      }
-    }
-
-    SPI_finish();
-  }
 }
 
 /*
@@ -1196,8 +1103,8 @@ extern "C" void parquetGetForeignRelSize(PlannerInfo *root, RelOptInfo *baserel,
     char nulls[1] = {' '};
 
     int ret =
-        SPI_execute_with_args("SELECT table_name, column_name FROM "
-                              "parquet_gsi_catalog WHERE foreigntable_oid = $1",
+        SPI_execute_with_args("SELECT index_name, column_name FROM "
+                              "gsi_registry WHERE foreigntable_oid = $1",
                               1, argtypes, values, nulls,
                               true, // read only
                               0     // returns all tuples
@@ -1632,8 +1539,6 @@ extern "C" void parquetGetForeignPaths(PlannerInfo *root, RelOptInfo *baserel,
     memcpy(gsi_private, fdw_private,
            sizeof(ParquetFdwPlanState)); // copy base state
     gsi_private->is_gsi = true;          // chosen gsi;
-    populate_gsi_scan_targets(gsi_private, baserel->baserestrictinfo, true);
-
     // cost estimation
     /* NEED TO CONFIGURE overhead startup cost and run time COST
         the row lookups isn't sequential so may be there is random io
@@ -1883,9 +1788,11 @@ static bool resolve_gsi_targets(List *usable_gsi_attrs,
 
       // querying the GSI table to get the relevant parquet file paths and rowgroup ids
       appendStringInfo(&query,
-                       "SELECT parquet_file_path, rowgroup_id FROM %s WHERE "
-                       "indexed_val %s $1",
-                       quote_identifier(index_table_name) , sql_op);
+                       "SELECT fc.file_path, idx.rowgroup_ids "
+                       "FROM %s idx "
+                       "JOIN public.gsi_file_catalog fc ON fc.file_id = idx.file_id "
+                       "WHERE idx.indexed_val %s $1",
+                       quote_identifier(index_table_name), sql_op);
 
       int ret = SPI_execute_with_args(query.data, 1, argtypes, values, nulls,
                                       true, 0);
@@ -1894,7 +1801,7 @@ static bool resolve_gsi_targets(List *usable_gsi_attrs,
       {
         filenames = NIL;
         rowgroups_list = NIL;
-
+        
         for (uint64 row = 0; row < SPI_processed; row++)
         {
           bool isNullFile, isNullRg;
@@ -1906,12 +1813,30 @@ static bool resolve_gsi_targets(List *usable_gsi_attrs,
           if (!isNullFile && !isNullRg)
           {
             char *file_str = TextDatumGetCString(file_datum);
-            int32 rg_id = DatumGetInt32(rg_datum);
+            ArrayType *rg_array = DatumGetArrayTypeP(rg_datum);
+            Datum *rg_values = NULL;
+            bool *rg_nulls = NULL;
+            int rg_count = 0;
+
+            if (ARR_ELEMTYPE(rg_array) != INT4OID)
+              continue;
+
+            deconstruct_array(rg_array, INT4OID, 4, true, 'i',
+                              &rg_values, &rg_nulls, &rg_count);
 
             MemoryContext spi_cxt = MemoryContextSwitchTo(oldcxt);
             int file_idx = -1;
             int cur_idx = 0;
             ListCell *lc_file;
+            List *new_rgs = NIL;
+
+            for (int rg_idx = 0; rg_idx < rg_count; rg_idx++)
+            {
+              if (rg_nulls != NULL && rg_nulls[rg_idx])
+                continue;
+
+              new_rgs = lappend_int(new_rgs, DatumGetInt32(rg_values[rg_idx]));
+            }
 
             foreach (lc_file, filenames)
             {
@@ -1926,13 +1851,23 @@ static bool resolve_gsi_targets(List *usable_gsi_attrs,
             if (file_idx == -1)
             {
               filenames = lappend(filenames, makeString(pstrdup(file_str)));
-              rowgroups_list = lappend(rowgroups_list, list_make1_int(rg_id));
+              rowgroups_list = lappend(rowgroups_list, new_rgs);
             }
             else
             {
               ListCell *lc_rg = list_nth_cell(rowgroups_list, file_idx);
               List *existing_rgs = (List *)lfirst(lc_rg);
-              lfirst(lc_rg) = lappend_int(existing_rgs, rg_id);
+              ListCell *lc_new_rg;
+
+              foreach (lc_new_rg, new_rgs)
+              {
+                int rg_id = lfirst_int(lc_new_rg);
+
+                if (!list_member_int(existing_rgs, rg_id))
+                  existing_rgs = lappend_int(existing_rgs, rg_id);
+              }
+
+              lfirst(lc_rg) = existing_rgs;
             }
 
             MemoryContextSwitchTo(spi_cxt);

@@ -31,7 +31,7 @@ CONFIGS = {
     "large":  dict(num_customers=10000000, num_products=2000000, num_tx=70000000, chunk_tx=800000, chunk_dim=500000, row_group=100000),
 }
 
-cfg = CONFIGS[args.target]g
+cfg = CONFIGS[args.target]
 
 NUM_CUSTOMERS = cfg["num_customers"]
 NUM_PRODUCTS  = cfg["num_products"]

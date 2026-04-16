@@ -8,7 +8,7 @@ set(CMAKE_DEPENDS_LANGUAGES
 
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
-  "/home/kunj/Desktop/DBIS-lab/DBIS_Project/parquet_extraction_engine/main.cpp" "CMakeFiles/extractor.dir/main.cpp.o" "gcc" "CMakeFiles/extractor.dir/main.cpp.o.d"
+  "/home/dhruvraj/Desktop/DBMS/DBIS_Project/parquet_extraction_engine/main.cpp" "CMakeFiles/extractor.dir/main.cpp.o" "gcc" "CMakeFiles/extractor.dir/main.cpp.o.d"
   )
 
 # Targets to which this target links which contain Fortran sources.

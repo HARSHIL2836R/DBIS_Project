@@ -159,7 +159,7 @@ VALUES ('public.customers'::regclass::oid, 'gsi_customers_age', 'age');
 CREATE TABLE IF NOT EXISTS gsi_customers_age (
     parquet_file_path text,
     rowgroup_id int,
-    indexed_val int   -- Matches the type of the 'age' column
+    indexed_val int,   -- Matches the type of the 'age' column
     primary key (indexed_val,parquet_file_path, rowgroup_id)
 );
 

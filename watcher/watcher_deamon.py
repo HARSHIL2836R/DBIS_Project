@@ -6,10 +6,9 @@ import re
 import threading
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-
+from extractor import extract_index_coordinates
 # --- Configuration via Environment Variables ---
 DATA_LAKE_DIR = os.environ.get("DATA_LAKE_DIR", "./data_lake")
-EXTRACTOR_CMD = os.environ.get("EXTRACTOR_CMD", "./build/extractor")
 TARGET_COLUMN = os.environ.get("TARGET_COLUMN", "0")
 
 DB_PARAMS = {
@@ -59,46 +58,27 @@ def initialize_database():
 # Subtask 3.2 & 3.4: Pipeline Hand-off & Index Upsertion
 # =====================================================================
 def trigger_extraction_engine(file_path):
-    """Runs C++, reads the output, and safely inserts into PostgreSQL."""
+    """Runs extraction in memory and safely inserts into PostgreSQL."""
     with process_lock:
         print(f"\n---> Hand-off triggered for: {file_path}")
         
         try:
-            # 1. Run the C++ executable
-            subprocess.run(
-                [EXTRACTOR_CMD, file_path, TARGET_COLUMN], 
-                check=True,
-                capture_output=True,
-                text=True
-            )
+            # 1. Call the Python function directly! No subprocess, no disk I/O.
+            # Convert TARGET_COLUMN string to int
+            records = extract_index_coordinates(file_path, int(TARGET_COLUMN))
             
-            # 2. Read the generated text file
-            coords_file = "extracted_coordinates.txt"
-            if not os.path.exists(coords_file):
-                print(f"X No coordinates file generated for {file_path}")
-                return
-
-            records = []
-            pattern = re.compile(r"\{ value: (.*?), file_path: (.*?), row_group_id: (\d+) \}")
-            
-            with open(coords_file, "r") as f:
-                for line in f:
-                    match = pattern.search(line)
-                    if match:
-                        records.append((match.group(1), match.group(2), int(match.group(3))))
-
-            # 3. Database Updates (Cleanup + Insert)
+            # 2. Database Updates (Cleanup + Insert)
             if records:
                 conn = psycopg2.connect(**DB_PARAMS)
                 cur = conn.cursor()
                 
-                # --- NEW: Delete old records before overwriting ---
+                # Clean old records to prevent duplication
                 cur.execute("DELETE FROM global_index WHERE file_path = %s;", (file_path,))
                 deleted = cur.rowcount
                 if deleted > 0:
                     print(f"  -> Cleaned {deleted} old records to prevent duplication.")
                 
-                # --- Insert new records ---
+                # Insert new records directly from the list of tuples
                 insert_query = "INSERT INTO global_index (indexed_value, file_path, row_group_id) VALUES (%s, %s, %s)"
                 cur.executemany(insert_query, records)
                 
@@ -106,15 +86,11 @@ def trigger_extraction_engine(file_path):
                 cur.close()
                 conn.close()
                 print(f"Successfully ingested {len(records)} coordinates into PostgreSQL!")
-
-            # 4. Clean up the text file
-            os.remove(coords_file)
-            
-        except subprocess.CalledProcessError as e:
-            print(f"X Extraction failed for {file_path}")
-            print(f"Error Details: {e.stderr}")
+            else:
+                print(f"No valid records found to ingest for {file_path}")
+                
         except Exception as e:
-            print(f"X Database Error: {e}")
+            print(f"X Database or Extraction Error: {e}")
 
 # =====================================================================
 # Subtask 3.1: Directory Polling

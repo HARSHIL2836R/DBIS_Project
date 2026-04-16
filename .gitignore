@@ -5,10 +5,6 @@ data/data_lake
 parquet_extraction_engine/build
 parquet_gsi_fdw/fdw_explanation.md
 data/read_parquet.py
-*.bc
-*.control
-*.o
-*.so
 .gitignore
 /parquet_extraction_engine/comment.cpp
 *.env

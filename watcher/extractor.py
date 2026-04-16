@@ -2,18 +2,6 @@ import pyarrow.parquet as pq
 from collections import defaultdict
 
 def extract_index_coordinates(file_path: str, target_col_idx: int) -> list:
-    """
-    Reads a Parquet file and groups Row Group IDs by their column values.
-    
-    Returns:
-        A list of dictionaries:
-        [
-            {"value": 30, "rowgroup_ids": [0, 2]},
-            {"value": 45, "rowgroup_ids": [1]}
-        ]
-    """
-    # Use a dictionary of sets to automatically group and deduplicate Row Group IDs
-    # e.g., grouped_data["30"] = {0, 2}
     grouped_data = defaultdict(set)
     
     try:
@@ -60,16 +48,16 @@ def extract_index_coordinates(file_path: str, target_col_idx: int) -> list:
 
 #manually checking
 
-if __name__ == "__main__":
-    #take file path and column index as input
-    import argparse
-    parser = argparse.ArgumentParser(description="Extract index coordinates from a Parquet file.")
-    parser.add_argument("file_path", type=str, help="Path to the Parquet file")
-    parser.add_argument("column_index", type=int, help="Column index to extract")
-    args = parser.parse_args()
+# if __name__ == "__main__":
+#     #take file path and column index as input
+#     import argparse
+#     parser = argparse.ArgumentParser(description="Extract index coordinates from a Parquet file.")
+#     parser.add_argument("file_path", type=str, help="Path to the Parquet file")
+#     parser.add_argument("column_index", type=int, help="Column index to extract")
+#     args = parser.parse_args()
 
-    #call the function and print the results
-    extracted_records = extract_index_coordinates(args.file_path, args.column_index)
-    print(f"Extracted {len(extracted_records)} records:")
-    for record in extracted_records[:10]:  # Print only the first 10 records for brevity
-        print(record)
+#     #call the function and print the results
+#     extracted_records = extract_index_coordinates(args.file_path, args.column_index)
+#     print(f"Extracted {len(extracted_records)} records:")
+#     for record in extracted_records[:10]:  # Print only the first 10 records for brevity
+#         print(record)

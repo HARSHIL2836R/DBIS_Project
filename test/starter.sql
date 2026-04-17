@@ -78,7 +78,7 @@ BEGIN
 END;
 $$;
 
-DO $$list_parquet_files_recursive_jsonb
+DO $$
 BEGIN
     IF to_regclass('public.customers') IS NULL THEN
         PERFORM import_parquet_explicit(

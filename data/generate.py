@@ -21,12 +21,9 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+import psycopg2
+import psycopg2.extras
 
-try:
-    import psycopg2
-    import psycopg2.extras
-except ImportError:
-    psycopg2 = None
 
 
 parser = argparse.ArgumentParser()
@@ -41,13 +38,7 @@ parser.add_argument(
     "--mode",
     choices=["generate", "append"],
     default="generate",
-    help="generate creates the selected base table(s); append only adds new files",
-)
-parser.add_argument(
-    "--table",
-    choices=["all", "customers", "products", "transactions"],
-    default="all",
-    help="Base table(s) to create in generate mode",
+    help="generate creates all base tables; append only adds new files",
 )
 parser.add_argument(
     "--add-table",
@@ -111,17 +102,6 @@ parser.add_argument(
     default=0.0,
     help="0 samples ids uniformly; larger values create hot customers/products",
 )
-parser.add_argument(
-    "--reference-sample-size",
-    type=int,
-    default=1_000_000,
-    help="Max existing customer/product ids to load in append mode",
-)
-parser.add_argument(
-    "--skip-db-refresh",
-    action="store_true",
-    help="Do not call refresh_parquet_foreign_table_files after appending files",
-)
 parser.add_argument("--seed", type=int, default=42, help="Numpy/random seed")
 args = parser.parse_args()
 
@@ -133,8 +113,6 @@ if args.add_rows_per_file is not None and args.add_rows_per_file <= 0:
     parser.error("--add-rows-per-file must be positive")
 if args.tx_rows_per_file is not None and args.tx_rows_per_file <= 0:
     parser.error("--tx-rows-per-file must be positive")
-if args.reference_sample_size <= 0:
-    parser.error("--reference-sample-size must be positive")
 if min(args.month_skew, args.file_skew, args.value_skew, args.id_skew) < 0:
     parser.error("skew values must be >= 0")
 
@@ -172,6 +150,7 @@ DB_CONFIG = {
     "host": "localhost",
     "port": "5432",
 }
+REFERENCE_SAMPLE_SIZE = 1_000_000
 
 cfg = CONFIGS[args.target]
 
@@ -214,8 +193,8 @@ def skewed_probs(size: int, skew: float) -> np.ndarray:
         return np.full(size, 1 / size, dtype=float)
 
     ranks = np.arange(1, size + 1, dtype=float)
-    weights = 1.0 / np.power(ranks, skew)
-    weights = np.random.permutation(weights)
+    weights = 1.0 / np.power(ranks, skew) # formula : weight = 1 / (rank^skew)
+    weights = np.random.permutation(weights) # shuffle randomly
     return weights / weights.sum()
 
 
@@ -258,6 +237,7 @@ def choose(values: list[str], n: int, probs: np.ndarray) -> np.ndarray:
 
 def rand_date(n: int) -> np.ndarray:
     base = np.datetime64("2023-01-01", "D")
+    #generate offsets up to 2 years (730 days) and add to base date
     off = np.random.randint(0, 730, n).astype("timedelta64[D]")
     return pd.to_datetime(base + off).date
 
@@ -266,6 +246,7 @@ def rand_ts_between(n: int, start, end) -> pd.DatetimeIndex:
     start = np.datetime64(start, "s")
     end = np.datetime64(end, "s")
     span_seconds = int((end - start) / np.timedelta64(1, "s"))
+    #generates transaction timestamps uniformly between start and end by creating random second offsets and adding to start
     off = np.random.randint(0, span_seconds, n).astype("timedelta64[s]")
     return pd.to_datetime(start + off)
 
@@ -302,10 +283,6 @@ def parquet_files(root: Path) -> list[Path]:
     return sorted(path for path in root.rglob("*.parquet") if path.is_file())
 
 
-def selected_generate_tables() -> set[str]:
-    return set(TABLES) if args.table == "all" else {args.table}
-
-
 def reset_table_dirs(tables: set[str]) -> None:
     for table in TABLES:
         root = DATA_LAKE_DIR / table
@@ -316,12 +293,6 @@ def reset_table_dirs(tables: set[str]) -> None:
 
 
 def refresh_foreign_table_files(table: str) -> None:
-    if psycopg2 is None:
-        raise SystemExit(
-            "psycopg2 is required for append-mode PostgreSQL refresh. "
-            "Install psycopg2 or use --skip-db-refresh."
-        )
-
     data_dir = str((DATA_LAKE_DIR / table).resolve())
 
     print(f"\nRefreshing public.{table} foreign table file list ...")
@@ -352,7 +323,7 @@ def refresh_foreign_table_files(table: str) -> None:
             "PostgreSQL refresh failed after appending files.\n"
             f"DB config: {safe_db_config}\n"
             f"Error: {exc}\n"
-            "Use --skip-db-refresh only if you will refresh the foreign table manually."
+            "Refresh is required after append mode so PostgreSQL sees new files."
         ) from exc
     finally:
         if conn is not None:
@@ -558,12 +529,12 @@ def load_or_make_reference_ids(
     if already_loaded is not None:
         return already_loaded
 
-    loaded = load_existing_ids(table, column, args.reference_sample_size)
+    loaded = load_existing_ids(table, column, REFERENCE_SAMPLE_SIZE)
     if loaded is not None:
         print(f"  loaded {len(loaded):,} existing {table}.{column} values")
         return loaded
 
-    temporary_rows = min(fallback_rows, args.reference_sample_size)
+    temporary_rows = min(fallback_rows, REFERENCE_SAMPLE_SIZE)
     print(f"  no existing {table} ids found; using {temporary_rows:,} temporary ids")
     return id_pool(temporary_rows)
 
@@ -719,40 +690,29 @@ def summarize() -> None:
 
 ## delete all files in data lake
 
-print(f"Target: {args.target}  |  Output: {DATA_LAKE_DIR}")
-print(
-    f"Mode  : {args.mode}  |  Base table: {args.table}  |  "
-    f"Append table: {args.add_table}"
-)
-print(f"  Customers    : {NUM_CUSTOMERS:>12,} rows")
-print(f"  Products     : {NUM_PRODUCTS:>12,} rows")
-print(f"  Transactions : {NUM_TX:>12,} rows")
+if __name__ == "__main__":
+    print(f"Target: {args.target}  |  Output: {DATA_LAKE_DIR}")
+    print(
+        f"Mode  : {args.mode}  |  Base tables: all  |  Append table: {args.add_table}"
+    )
+    print(f"  Customers    : {NUM_CUSTOMERS:>12,} rows")
+    print(f"  Products     : {NUM_PRODUCTS:>12,} rows")
+    print(f"  Transactions : {NUM_TX:>12,} rows")
 
-all_customer_ids = None
-all_product_ids = None
+    all_customer_ids = None
+    all_product_ids = None
 
-if args.mode == "generate":
-    tables = selected_generate_tables()
-    reset_table_dirs(tables)
-
-    if "customers" in tables:
+    if args.mode == "generate":
+        reset_table_dirs(set(TABLES))
         all_customer_ids = generate_customers()
-    if "products" in tables:
         all_product_ids = generate_products()
-    if "transactions" in tables:
-        all_customer_ids = load_or_make_reference_ids(
-            "customers", "customer_id", NUM_CUSTOMERS, all_customer_ids
-        )
-        all_product_ids = load_or_make_reference_ids(
-            "products", "product_id", NUM_PRODUCTS, all_product_ids
-        )
         generate_transactions(all_customer_ids, all_product_ids)
-else:
-    reset_table_dirs(set())
+    else:
+        reset_table_dirs(set())
 
-append_files(args.add_table, args.add_files, all_customer_ids, all_product_ids)
+    append_files(args.add_table, args.add_files, all_customer_ids, all_product_ids)
 
-if args.add_files > 0 and not args.skip_db_refresh:
-    refresh_foreign_table_files(args.add_table)
+    if args.add_files > 0:
+        refresh_foreign_table_files(args.add_table)
 
-summarize()
+    summarize()

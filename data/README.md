@@ -52,18 +52,12 @@ Generate the full medium-sized dataset with the default layout:
 python3 ./generate.py
 ```
 
-Important: `generate` mode deletes the selected old table folders before writing new data.
+Important: `generate` mode deletes the old `customers/`, `products/`, and `transactions/` folders before writing new data.
 
 Generate a smaller dataset in a custom directory:
 
 ```bash
 python3 ./generate.py --target small --out ./data_lake
-```
-
-Generate only transactions:
-
-```bash
-python3 ./generate.py --table transactions
 ```
 
 Generate with skewed data and fewer, larger month-heavy files:
@@ -114,19 +108,8 @@ python3 ./generate.py --out /tmp/data_lake
 
 Controls whether the script creates a fresh dataset or appends extra files.
 
-- `generate` default: delete and recreate the selected base table folder(s)
+- `generate` default: delete and recreate all base table folders
 - `append`: write new files into an existing lake without deleting old files
-
-### `--table`
-
-Used with `--mode generate`.
-
-- `all` default: generate customers, products, and transactions
-- `customers`
-- `products`
-- `transactions`
-
-In `generate` mode, the selected table folder(s) are deleted first. For example, `--table transactions` removes only `transactions/`, while `--table all` removes `customers/`, `products/`, and `transactions/`.
 
 ### `--add-table`
 
@@ -156,21 +139,6 @@ Target rows for each appended file.
 
 - If omitted, the script uses the default chunk size for that table.
 - For transactions, it falls back to the transaction rows-per-file setting.
-
-### `--skip-db-refresh`
-
-Disables the automatic PostgreSQL refresh after append mode.
-
-Use this only when PostgreSQL is not running or when you plan to refresh the foreign table manually.
-
-Manual refresh example:
-
-```sql
-SELECT public.refresh_parquet_foreign_table_files(
-  'public.transactions'::regclass,
-  '{"dir": "/tmp/data_lake/transactions"}'::jsonb
-);
-```
 
 ### `--add-partition-value`
 
@@ -241,12 +209,116 @@ Creates hot customers and hot products in transactions.
 - `0` samples customer and product ids uniformly.
 - Higher values make a smaller set of ids appear more often.
 
-### `--reference-sample-size`
+## Probability Arrays
 
-When appending transactions, the script tries to reuse existing customer and product ids from the lake.
+The generator converts skew CLI values into probability arrays before creating rows:
 
-- This limits how many ids are loaded from existing files.
-- If no existing ids are found, the script falls back to temporary ids.
+```python
+MONTH_PROBS = skewed_probs(len(TX_MONTHS), args.month_skew)
+REGION_PROBS = skewed_probs(len(REGIONS), args.value_skew)
+STATUS_PROBS = skewed_probs(len(STATUSES), args.value_skew)
+PAYMENT_PROBS = skewed_probs(len(PAYMENTS), args.value_skew)
+LOYALTY_PROBS = skewed_probs(len(LOYALTY), args.value_skew)
+CAT_PROBS = skewed_probs(len(CATS), args.value_skew)
+```
+
+Each array has one probability per possible value. For example, `REGION_PROBS` has one probability for each region in `REGIONS`, and `CAT_PROBS` has one probability for each product category in `CATS`.
+
+When the skew value is `0`, every value gets the same probability. If there are 6 regions, each region gets about `1/6` of the rows.
+
+When the skew value is greater than `0`, some values receive much larger probabilities and others receive smaller probabilities. That creates non-uniform data, like one region or category appearing much more often.
+
+Where these arrays are used:
+
+- `MONTH_PROBS`: decides how many transaction rows go into each month.
+- `REGION_PROBS`: chooses customer and transaction regions.
+- `STATUS_PROBS`: chooses transaction status values.
+- `PAYMENT_PROBS`: chooses transaction payment methods.
+- `LOYALTY_PROBS`: chooses customer loyalty tiers.
+- `CAT_PROBS`: chooses product categories.
+
+Example:
+
+```bash
+python3 ./generate.py --month-skew 1.5 --value-skew 1.2
+```
+
+This creates a lake where some months have many more transactions, and some regions, statuses, payment methods, loyalty tiers, and categories are much more common than others.
+
+## Count Helpers
+
+The generator uses two helper functions to convert probabilities and file targets into exact integer row counts:
+
+```python
+def exact_counts(total: int, probs: np.ndarray) -> np.ndarray:
+    ...
+
+def split_count(total: int, pieces: int, skew: float) -> np.ndarray:
+    ...
+```
+
+### `exact_counts(total, probs)`
+
+`exact_counts()` converts probability weights into integer counts that add up exactly to `total`.
+
+Example use case:
+
+```python
+month_counts = exact_counts(NUM_TX, MONTH_PROBS)
+```
+
+If `NUM_TX` is `2,000,000`, this decides exactly how many transaction rows each month gets. The important part is that the final month counts always sum back to exactly `2,000,000`.
+
+Why this is needed:
+
+- `probs * total` produces decimal values.
+- Parquet rows must be whole numbers.
+- Simple rounding can lose or add rows.
+- `exact_counts()` floors the decimal counts, then gives leftover rows to the largest fractional remainders.
+
+Small example:
+
+```text
+total = 10
+probs = [0.33, 0.33, 0.34]
+raw = [3.3, 3.3, 3.4]
+floor = [3, 3, 3]
+remainder = 1
+final = [3, 3, 4]
+```
+
+### `split_count(total, pieces, skew)`
+
+`split_count()` splits a total number of rows across a fixed number of files or chunks.
+
+Example use case:
+
+```python
+row_counts = split_count(month_rows, file_count, args.file_skew)
+```
+
+If one month has `450,000` rows and needs `3` Parquet files, this returns something like:
+
+```text
+[150000, 150000, 150000]
+```
+
+With `--file-skew` greater than `0`, it can return uneven file sizes, such as:
+
+```text
+[240000, 130000, 80000]
+```
+
+Why this is needed:
+
+- Every output file should get at least one row.
+- The row counts must add up exactly to the month or append total.
+- `--file-skew` should make file sizes non-uniform without changing the total row count.
+
+Where it is used:
+
+- In full transaction generation, it splits each month into Parquet files.
+- In append mode, it splits appended rows across the requested number of new files.
 
 ### `--seed`
 
@@ -266,16 +338,16 @@ Generate a small lake in `/tmp/data_lake`:
 python3 ./generate.py --target small --out /tmp/data_lake
 ```
 
-Generate only the transaction table with monthly partitions:
+Generate all tables with monthly transaction partitions:
 
 ```bash
-python3 ./generate.py --table transactions --tx-partition month
+python3 ./generate.py --tx-partition month
 ```
 
-Generate transactions with year-based folders:
+Generate all tables with year-based transaction folders:
 
 ```bash
-python3 ./generate.py --table transactions --tx-partition year
+python3 ./generate.py --tx-partition year
 ```
 
 Generate a non-uniform lake:
@@ -301,16 +373,6 @@ Append 3 customer files with custom file size:
 
 ```bash
 python3 ./generate.py --mode append --add-table customers --add-files 3 --add-rows-per-file 50000
-```
-
-Append files without touching PostgreSQL:
-
-```bash
-python3 ./generate.py \
-  --mode append \
-  --add-table transactions \
-  --add-files 5 \
-  --skip-db-refresh
 ```
 
 ## Output Layout
@@ -339,9 +401,9 @@ data_lake/
 ## Notes
 
 - The script prints a summary at the end with file counts and total size.
-- In generate mode, selected old table folders are removed before new files are written.
+- In generate mode, old `customers/`, `products/`, and `transactions/` folders are removed before new files are written.
 - In append mode, file numbering continues from the highest existing file index it finds.
-- In append mode, the script refreshes the PostgreSQL foreign table file list unless `--skip-db-refresh` is used.
+- In append mode, the script always refreshes the PostgreSQL foreign table file list.
 - If you want the new data lake to be visible to the repo's FDW setup, point the FDW import path at the generated output directory.
 
 ## PostgreSQL Refresh After Append

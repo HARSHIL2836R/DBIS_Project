@@ -78,7 +78,7 @@ BEGIN
 END;
 $$;
 
-DO $$
+DO $$list_parquet_files_recursive_jsonb
 BEGIN
     IF to_regclass('public.customers') IS NULL THEN
         PERFORM import_parquet_explicit(
@@ -240,6 +240,8 @@ CREATE TABLE IF NOT EXISTS public.gsi_index_file_state (
     PRIMARY KEY (index_name, file_id)
 );
 
+DELETE from public.gsi_index_file_state;
+
 CREATE INDEX IF NOT EXISTS gsi_index_file_state_status_idx
 ON public.gsi_index_file_state (index_name, status);
 
@@ -330,6 +332,13 @@ SELECT public.register_gsi(
     'gsi_customers_age',
     'age',
     '/tmp/data_lake/customers'
+);
+
+SELECT public.register_gsi(
+    'public.transactions' :: regclass,
+    'gsi_transactions_customer_id',
+    'customer_id',
+    '/tmp/data_lake/transactions'
 );
 
 SELECT index_name, table_name, column_name, status

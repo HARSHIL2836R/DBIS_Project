@@ -364,6 +364,7 @@ def make_customers(
     customer_ids: np.ndarray,
     start_index: int,
     email_prefix: str = "user",
+    ci: int = 0,
 ) -> pd.DataFrame:
     n = len(customer_ids)
     return pd.DataFrame(
@@ -373,7 +374,7 @@ def make_customers(
                 f"{email_prefix}_{start_index + i}@example.com" for i in range(n)
             ],
             "region": choose(REGIONS, n, REGION_PROBS),
-            "age": np.random.randint(18, 80, n).astype(np.int32),
+            "age": np.random.randint(18+ci, 80, n).astype(np.int32),
             "loyalty_tier": choose(LOYALTY, n, LOYALTY_PROBS),
             "signup_date": rand_date(n),
             "total_orders": np.random.randint(0, 500, n).astype(np.int32),
@@ -441,7 +442,7 @@ def generate_customers() -> np.ndarray:
 
     for ci, start in enumerate(range(0, NUM_CUSTOMERS, CHUNK_DIM)):
         end = min(start + CHUNK_DIM, NUM_CUSTOMERS)
-        chunk = make_customers(all_customer_ids[start:end], start)
+        chunk = make_customers(all_customer_ids[start:end], start,ci)
         path = DATA_LAKE_DIR / "customers" / f"customers_chunk_{ci:04d}.parquet"
         write_parquet(chunk, path)
         if ci % 10 == 0 or end == NUM_CUSTOMERS:
@@ -636,6 +637,8 @@ def summarize() -> None:
         print(f"Rows per file            : {meta.num_rows:,}")
 
 
+## delete all files in data lake
+
 print(f"Target: {args.target}  |  Output: {DATA_LAKE_DIR}")
 print(
     f"Mode  : {args.mode}  |  Base table: {args.table}  |  "
@@ -647,6 +650,14 @@ print(f"  Transactions : {NUM_TX:>12,} rows")
 
 for sub in ["customers", "products", "transactions"]:
     (DATA_LAKE_DIR / sub).mkdir(parents=True, exist_ok=True)
+    for file in os.listdir(DATA_LAKE_DIR / sub):
+        if file.endswith(".parquet"):
+            os.remove(DATA_LAKE_DIR / sub / file)
+        else:
+            ### assuming transaction has sub directory
+            for subfile in os.listdir(DATA_LAKE_DIR / sub / file):
+                if subfile.endswith(".parquet"):
+                    os.remove(DATA_LAKE_DIR / sub / file / subfile)
 
 all_customer_ids = None
 all_product_ids = None

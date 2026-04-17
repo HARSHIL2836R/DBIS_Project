@@ -8,17 +8,24 @@
 
 By default it writes into `./data_lake`, with one subdirectory per table.
 
+The commands in this README assume you are running from the `data/` directory:
+
+```bash
+cd data
+```
+
 ## Requirements
 
 - Python 3
 - `numpy`
 - `pandas`
 - `pyarrow`
+- `psycopg2`
 
 Example install:
 
 ```bash
-pip install numpy pandas pyarrow
+pip install numpy pandas pyarrow psycopg2-binary
 ```
 
 ## What the generator writes
@@ -44,6 +51,8 @@ Generate the full medium-sized dataset with the default layout:
 ```bash
 python3 ./generate.py
 ```
+
+Important: `generate` mode deletes the selected old table folders before writing new data.
 
 Generate a smaller dataset in a custom directory:
 
@@ -77,6 +86,8 @@ python3 ./generate.py \
   --add-rows-per-file 50000
 ```
 
+Append mode does not delete older files. After appending, the script refreshes the PostgreSQL foreign table file list by calling `public.refresh_parquet_foreign_table_files(...)` through `psycopg2`.
+
 ## CLI Reference
 
 ### `--target`
@@ -103,8 +114,8 @@ python3 ./generate.py --out /tmp/data_lake
 
 Controls whether the script creates a fresh dataset or appends extra files.
 
-- `generate` default: create the selected base table(s)
-- `append`: write new files into an existing lake
+- `generate` default: delete and recreate the selected base table folder(s)
+- `append`: write new files into an existing lake without deleting old files
 
 ### `--table`
 
@@ -115,20 +126,23 @@ Used with `--mode generate`.
 - `products`
 - `transactions`
 
+In `generate` mode, the selected table folder(s) are deleted first. For example, `--table transactions` removes only `transactions/`, while `--table all` removes `customers/`, `products/`, and `transactions/`.
+
 ### `--add-table`
 
 Used with `--mode append` or when `--add-files` is set.
 
 - `customers`
 - `products`
-- `transactions` 
-default: `all`
+- `transactions` default
 
 This selects which table receives the new files.
 
 ### `--add-files`
 
 Number of new Parquet files to add in append mode.
+
+This means "how many new Parquet chunks to create", not "how many rows". Use `--add-rows-per-file` to control rows per new file.
 
 Example:
 
@@ -142,6 +156,21 @@ Target rows for each appended file.
 
 - If omitted, the script uses the default chunk size for that table.
 - For transactions, it falls back to the transaction rows-per-file setting.
+
+### `--skip-db-refresh`
+
+Disables the automatic PostgreSQL refresh after append mode.
+
+Use this only when PostgreSQL is not running or when you plan to refresh the foreign table manually.
+
+Manual refresh example:
+
+```sql
+SELECT public.refresh_parquet_foreign_table_files(
+  'public.transactions'::regclass,
+  '{"dir": "/tmp/data_lake/transactions"}'::jsonb
+);
+```
 
 ### `--add-partition-value`
 
@@ -262,13 +291,26 @@ python3 ./generate.py \
 Append 12 new transaction files:
 
 ```bash
-python3 ./generate.py --mode append --add-table transactions --add-files 12
+python3 ./generate.py \
+  --mode append \
+  --add-table transactions \
+  --add-files 12
 ```
 
 Append 3 customer files with custom file size:
 
 ```bash
 python3 ./generate.py --mode append --add-table customers --add-files 3 --add-rows-per-file 50000
+```
+
+Append files without touching PostgreSQL:
+
+```bash
+python3 ./generate.py \
+  --mode append \
+  --add-table transactions \
+  --add-files 5 \
+  --skip-db-refresh
 ```
 
 ## Output Layout
@@ -297,5 +339,90 @@ data_lake/
 ## Notes
 
 - The script prints a summary at the end with file counts and total size.
+- In generate mode, selected old table folders are removed before new files are written.
 - In append mode, file numbering continues from the highest existing file index it finds.
-- If you want the new data lake to be visible to the repo’s FDW setup, point the FDW import path at the generated output directory.
+- In append mode, the script refreshes the PostgreSQL foreign table file list unless `--skip-db-refresh` is used.
+- If you want the new data lake to be visible to the repo's FDW setup, point the FDW import path at the generated output directory.
+
+## PostgreSQL Refresh After Append
+
+The FDW setup stores a static list of Parquet filenames in the foreign table options. When append mode creates new files, PostgreSQL will not automatically know about them unless the file list is refreshed.
+
+By default, append mode calls:
+
+```sql
+SELECT public.refresh_parquet_foreign_table_files(
+  'public.<table>'::regclass,
+  '{"dir": "<absolute-table-directory>"}'::jsonb
+);
+```
+
+For example, after appending transactions under `/tmp/data_lake`, it refreshes:
+
+```sql
+SELECT public.refresh_parquet_foreign_table_files(
+  'public.transactions'::regclass,
+  '{"dir": "/tmp/data_lake/transactions"}'::jsonb
+);
+```
+
+The append refresh uses the `DB_CONFIG` dictionary in `generate.py`:
+
+```python
+DB_CONFIG = {
+    "dbname": "postgres",
+    "user": "postgres",
+    "password": "hello",
+    "host": "localhost",
+    "port": "5432",
+}
+```
+
+Edit this config if your local PostgreSQL credentials are different.
+
+## GSI Demo Columns
+
+For visible GSI speedups, prefer high-cardinality equality lookups. These indexes usually narrow the result to very few files or row groups.
+
+Recommended columns:
+
+- `transactions.order_id`: best demo column because it is unique per transaction.
+- `customers.customer_id`: good for direct customer lookup.
+- `products.product_id`: good for direct product lookup.
+- `transactions.customer_id`: good for "all transactions for one customer" queries.
+- `transactions.product_id`: good for "all transactions for one product" queries.
+
+Weaker demo columns:
+
+- `customers.age`
+- `customers.region`
+- `transactions.status`
+- `products.category`
+
+These are low-cardinality columns, so many rows share the same value. A GSI on them can still work, but the query may touch many row groups and show little improvement.
+
+Example GSI registrations:
+
+```sql
+SELECT public.register_gsi(
+  'public.transactions'::regclass,
+  'gsi_transactions_order_id',
+  'order_id',
+  '/tmp/data_lake/transactions'
+);
+
+SELECT public.register_gsi(
+  'public.transactions'::regclass,
+  'gsi_transactions_customer_id',
+  'customer_id',
+  '/tmp/data_lake/transactions'
+);
+```
+
+Example query that should benefit from `transactions.order_id`:
+
+```sql
+SELECT *
+FROM public.transactions
+WHERE order_id = '<known-order-id>';
+```

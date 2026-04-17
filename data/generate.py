@@ -14,12 +14,19 @@ import math
 import os
 import random
 import re
+import shutil
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+try:
+    import psycopg2
+    import psycopg2.extras
+except ImportError:
+    psycopg2 = None
 
 
 parser = argparse.ArgumentParser()
@@ -45,7 +52,7 @@ parser.add_argument(
 parser.add_argument(
     "--add-table",
     choices=["customers", "products", "transactions"],
-    default="all",
+    default="transactions",
     help="Table to append files to when --mode append or --add-files is used",
 )
 parser.add_argument(
@@ -110,6 +117,11 @@ parser.add_argument(
     default=1_000_000,
     help="Max existing customer/product ids to load in append mode",
 )
+parser.add_argument(
+    "--skip-db-refresh",
+    action="store_true",
+    help="Do not call refresh_parquet_foreign_table_files after appending files",
+)
 parser.add_argument("--seed", type=int, default=42, help="Numpy/random seed")
 args = parser.parse_args()
 
@@ -153,6 +165,14 @@ CONFIGS = {
     ),
 }
 
+DB_CONFIG = {
+    "dbname": "postgres",
+    "user": "postgres",
+    "password": "hello",
+    "host": "localhost",
+    "port": "5432",
+}
+
 cfg = CONFIGS[args.target]
 
 NUM_CUSTOMERS = cfg["num_customers"]
@@ -180,6 +200,7 @@ CATS = [
     "Food",
     "Health",
 ]
+TABLES = ["customers", "products", "transactions"]
 
 np.random.seed(args.seed)
 random.seed(args.seed)
@@ -279,6 +300,65 @@ def parquet_files(root: Path) -> list[Path]:
     if not root.exists():
         return []
     return sorted(path for path in root.rglob("*.parquet") if path.is_file())
+
+
+def selected_generate_tables() -> set[str]:
+    return set(TABLES) if args.table == "all" else {args.table}
+
+
+def reset_table_dirs(tables: set[str]) -> None:
+    for table in TABLES:
+        root = DATA_LAKE_DIR / table
+        if table in tables and root.exists():
+            print(f"Removing old {table} files from {root}")
+            shutil.rmtree(root)
+        root.mkdir(parents=True, exist_ok=True)
+
+
+def refresh_foreign_table_files(table: str) -> None:
+    if psycopg2 is None:
+        raise SystemExit(
+            "psycopg2 is required for append-mode PostgreSQL refresh. "
+            "Install psycopg2 or use --skip-db-refresh."
+        )
+
+    data_dir = str((DATA_LAKE_DIR / table).resolve())
+
+    print(f"\nRefreshing public.{table} foreign table file list ...")
+    conn = None
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT public.refresh_parquet_foreign_table_files(
+                    %s::regclass,
+                    %s::jsonb
+                );
+                """,
+                (
+                    f"public.{table}",
+                    psycopg2.extras.Json({"dir": data_dir}),
+                ),
+            )
+        conn.commit()
+    except Exception as exc:
+        if conn is not None:
+            conn.rollback()
+        safe_db_config = dict(DB_CONFIG)
+        if safe_db_config.get("password"):
+            safe_db_config["password"] = "***"
+        raise SystemExit(
+            "PostgreSQL refresh failed after appending files.\n"
+            f"DB config: {safe_db_config}\n"
+            f"Error: {exc}\n"
+            "Use --skip-db-refresh only if you will refresh the foreign table manually."
+        ) from exc
+    finally:
+        if conn is not None:
+            conn.close()
+
+    print(f"Refreshed public.{table} with files from {data_dir}")
 
 
 def next_file_index(root: Path, prefix: str) -> int:
@@ -645,14 +725,12 @@ print(f"  Customers    : {NUM_CUSTOMERS:>12,} rows")
 print(f"  Products     : {NUM_PRODUCTS:>12,} rows")
 print(f"  Transactions : {NUM_TX:>12,} rows")
 
-for sub in ["customers", "products", "transactions"]:
-    (DATA_LAKE_DIR / sub).mkdir(parents=True, exist_ok=True)
-
 all_customer_ids = None
 all_product_ids = None
 
 if args.mode == "generate":
-    tables = {"customers", "products", "transactions"} if args.table == "all" else {args.table}
+    tables = selected_generate_tables()
+    reset_table_dirs(tables)
 
     if "customers" in tables:
         all_customer_ids = generate_customers()
@@ -666,6 +744,12 @@ if args.mode == "generate":
             "products", "product_id", NUM_PRODUCTS, all_product_ids
         )
         generate_transactions(all_customer_ids, all_product_ids)
+else:
+    reset_table_dirs(set())
 
 append_files(args.add_table, args.add_files, all_customer_ids, all_product_ids)
+
+if args.add_files > 0 and not args.skip_db_refresh:
+    refresh_foreign_table_files(args.add_table)
+
 summarize()

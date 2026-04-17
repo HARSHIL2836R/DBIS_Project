@@ -38,6 +38,46 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION public.refresh_parquet_foreign_table_files(
+    p_foreign_table regclass,
+    p_args jsonb
+)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    resolved_files text[];
+    qualified_name text;
+BEGIN
+    SELECT array_agg(file_path ORDER BY file_path)
+      INTO resolved_files
+      FROM unnest(public.list_parquet_files_recursive_jsonb(p_args)) AS t(file_path);
+
+    IF COALESCE(array_length(resolved_files, 1), 0) = 0 THEN
+        RAISE EXCEPTION 'no parquet files found for %', p_args;
+    END IF;
+
+    SELECT format('%I.%I', n.nspname, c.relname)
+      INTO qualified_name
+      FROM pg_class c
+      JOIN pg_namespace n
+        ON n.oid = c.relnamespace
+     WHERE c.oid = p_foreign_table;
+
+    IF qualified_name IS NULL THEN
+        RAISE EXCEPTION 'foreign table % does not exist', p_foreign_table::text;
+    END IF;
+
+    -- import_parquet_explicit stores a static filename list, so reruns need
+    -- to refresh the option when the data lake file set changes.
+    EXECUTE format(
+        'ALTER FOREIGN TABLE %s OPTIONS (SET filename %L)',
+        qualified_name,
+        array_to_string(resolved_files, ' ')
+    );
+END;
+$$;
+
 DO $$
 BEGIN
     IF to_regclass('public.customers') IS NULL THEN
@@ -70,6 +110,10 @@ BEGIN
             NULL
         );
     END IF;
+    PERFORM public.refresh_parquet_foreign_table_files(
+        'public.customers'::regclass,
+        '{"dir": "/tmp/data_lake/customers"}'::jsonb
+    );
 
     IF to_regclass('public.products') IS NULL THEN
         PERFORM import_parquet_explicit(
@@ -103,6 +147,10 @@ BEGIN
             NULL
         );
     END IF;
+    PERFORM public.refresh_parquet_foreign_table_files(
+        'public.products'::regclass,
+        '{"dir": "/tmp/data_lake/products"}'::jsonb
+    );
 
     IF to_regclass('public.transactions') IS NULL THEN
         PERFORM import_parquet_explicit(
@@ -142,6 +190,10 @@ BEGIN
             NULL
         );
     END IF;
+    PERFORM public.refresh_parquet_foreign_table_files(
+        'public.transactions'::regclass,
+        '{"dir": "/tmp/data_lake/transactions"}'::jsonb
+    );
 END;
 $$;
 

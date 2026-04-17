@@ -1566,33 +1566,33 @@ extern "C" void parquetGetForeignPaths(PlannerInfo *root, RelOptInfo *baserel,
 
     add_path(baserel, gsi_path);
 
-    if (baserel->consider_parallel > 0)
-    {
-      ParquetFdwPlanState *gsi_parallel_private;
-      Path *gsi_parallel_path;
-      int num_workers = max_parallel_workers_per_gather;
-      double gsi_rows_per_worker = gsi_rows / (num_workers + 1);
-      Cost gsi_parallel_total_cost =
-          gsi_startup_cost + (gsi_total_cost - gsi_startup_cost) / (num_workers + 1);
+    // if (baserel->consider_parallel > 0)
+    // {
+    //   ParquetFdwPlanState *gsi_parallel_private;
+    //   Path *gsi_parallel_path;
+    //   int num_workers = max_parallel_workers_per_gather;
+    //   double gsi_rows_per_worker = gsi_rows / (num_workers + 1);
+    //   Cost gsi_parallel_total_cost =
+    //       gsi_startup_cost + (gsi_total_cost - gsi_startup_cost) / (num_workers + 1);
 
-      gsi_parallel_private =
-          (ParquetFdwPlanState *)palloc(sizeof(ParquetFdwPlanState));
-      memcpy(gsi_parallel_private, gsi_private, sizeof(ParquetFdwPlanState));
+    //   gsi_parallel_private =
+    //       (ParquetFdwPlanState *)palloc(sizeof(ParquetFdwPlanState));
+    //   memcpy(gsi_parallel_private, gsi_private, sizeof(ParquetFdwPlanState));
 
-      gsi_parallel_path = (Path *)create_foreignscan_path(
-          root, baserel, NULL, gsi_rows_per_worker, gsi_startup_cost,
-          gsi_parallel_total_cost,
-          NULL, /* GSI does not preserve useful ordering */
-          NULL, /* no outer relation */
-          NULL, /* no extra plan */
-          (List *)gsi_parallel_private);
+    //   gsi_parallel_path = (Path *)create_foreignscan_path(
+    //       root, baserel, NULL, gsi_rows_per_worker, gsi_startup_cost,
+    //       gsi_parallel_total_cost,
+    //       NULL, /* GSI does not preserve useful ordering */
+    //       NULL, /* no outer relation */
+    //       NULL, /* no extra plan */
+    //       (List *)gsi_parallel_private);
 
-      gsi_parallel_path->parallel_workers = num_workers;
-      gsi_parallel_path->parallel_aware = true;
-      gsi_parallel_path->parallel_safe = true;
+    //   gsi_parallel_path->parallel_workers = num_workers;
+    //   gsi_parallel_path->parallel_aware = true;
+    //   gsi_parallel_path->parallel_safe = true;
 
-      add_partial_path(baserel, gsi_parallel_path);
-    }
+    //   add_partial_path(baserel, gsi_parallel_path);
+    // }
   }
 }
 

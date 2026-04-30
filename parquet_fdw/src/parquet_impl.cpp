@@ -90,6 +90,19 @@ bool enable_multifile_merge;
 static void find_cmp_func(FmgrInfo *finfo, Oid type1, Oid type2);
 static void destroy_parquet_state(void *arg);
 
+
+struct GsiClause {
+  AttrNumber attnum;
+  Datum value;
+  Oid value_type;
+  Oid opno;
+  bool valid;
+};
+// check and extract gsi clause
+static bool extract_gsi_qual(List *qual_list, AttrNumber index_attnum,
+                             GsiClause *out_qual, const char **out_sql_op);
+
+
 /*
  * Restriction
  */
@@ -986,9 +999,13 @@ static void get_table_options(Oid relid, ParquetFdwPlanState *fdw_private) {
     fdw_private->filenames = get_filenames_from_userfunc(funcname, funcarg);
 }
 
+// 
+
+
 extern "C" void parquetGetForeignRelSize(PlannerInfo *root, RelOptInfo *baserel,
                                          Oid foreigntableid) {
   ParquetFdwPlanState *fdw_private;
+  List *clause_list;
   std::list<RowGroupFilter> filters;
   RangeTblEntry *rte;
   Relation rel;
@@ -1000,12 +1017,13 @@ extern "C" void parquetGetForeignRelSize(PlannerInfo *root, RelOptInfo *baserel,
 
   fdw_private = (ParquetFdwPlanState *)palloc0(sizeof(ParquetFdwPlanState));
   get_table_options(foreigntableid, fdw_private);
+  clause_list = extract_actual_clauses(baserel->baserestrictinfo, false);
   /*
       GSI CHECK : check catalog to see if suitable index is present
       we are assuming that - parquet_gsi_catalog(foreigntableid, table_name,
      column_name) exists.
-
   */
+
   MemoryContext oldcxt = CurrentMemoryContext;
   if (SPI_connect() == SPI_OK_CONNECT) {
     Oid argtypes[1] = {OIDOID};
@@ -1038,18 +1056,13 @@ extern "C" void parquetGetForeignRelSize(PlannerInfo *root, RelOptInfo *baserel,
           AttrNumber index_attnum =
               get_attnum(foreigntableid, gsi_column_name_str);
           bool index_used = false;
-          foreach (lc, baserel->baserestrictinfo) {
-            RestrictInfo *rinfo = (RestrictInfo *)lfirst(lc);
-            Bitmapset *clause_attrs = NULL;
-            pull_varattnos((Node *)rinfo->clause, baserel->relid,
-                           &clause_attrs);
-            if (bms_is_member(index_attnum - FirstLowInvalidHeapAttributeNumber,
-                              clause_attrs)) {
-              index_used = true;
-              bms_free(clause_attrs);
-              break;
-            }
-            bms_free(clause_attrs);
+          GsiClause gsi_qual;
+          const char *sql_op = NULL;
+
+          if (index_attnum != InvalidAttrNumber &&
+              extract_gsi_qual(clause_list, index_attnum, &gsi_qual,
+                               &sql_op)) {
+            index_used = true;
           }
           if (index_used) {
             fdw_private->gsi_usable = true;
@@ -1450,7 +1463,7 @@ extern "C" void parquetGetForeignPaths(PlannerInfo *root, RelOptInfo *baserel,
     if (gsi_rg_selectivity < gsi_selectivity)
       gsi_rg_selectivity = gsi_selectivity;
 
-    Cost gsi_startup_cost = startup_cost + random_page_cost * 2;
+    Cost gsi_startup_cost = startup_cost + seq_page_cost * random_page_cost*2;
     Cost gsi_total_cost = gsi_startup_cost + run_cost * gsi_rg_selectivity;
 
     elog(DEBUG1,
@@ -1621,13 +1634,7 @@ static const char *get_gsi_operator_sql(Oid opno, bool was_swapped) {
   return flip_operator_name(opname);
 }
 
-struct GsiQual {
-  AttrNumber attnum;
-  Datum value;
-  Oid value_type;
-  Oid opno;
-  bool valid;
-};
+
 
 static Node *unwrap_gsi_node(Node *node) {
   while (node && IsA(node, RelabelType))
@@ -1637,10 +1644,10 @@ static Node *unwrap_gsi_node(Node *node) {
 }
 
 static bool extract_gsi_qual(List *qual_list, AttrNumber index_attnum,
-                             GsiQual *out_qual, const char **out_sql_op) {
+                             GsiClause *out_qual, const char **out_sql_op) {
   ListCell *lc_qual;
 
-  memset(out_qual, 0, sizeof(GsiQual));
+  memset(out_qual, 0, sizeof(GsiClause));
   out_qual->valid = false;
   *out_sql_op = NULL;
 
@@ -1712,7 +1719,7 @@ static bool resolve_gsi_targets(List *usable_gsi_attrs, List *qual_list,
   char *index_table_name = strVal(linitial(gsi_pair));
   AttrNumber index_attnum = (AttrNumber)intVal(lsecond(gsi_pair));
 
-  GsiQual gsi_qual;          // will hold the extracted GSI filter condition
+  GsiClause gsi_qual;          // will hold the extracted GSI filter condition
   const char *sql_op = NULL; // will hold the SQL operator corresponding to the
                              // GSI filter condition
 

@@ -8,5 +8,4 @@ data/read_parquet.py
 .gitignore
 /parquet_extraction_engine/comment.cpp
 *.env
-*.txt
 watcher/__pycache__/

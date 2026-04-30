@@ -280,7 +280,7 @@ def reset_table_dirs(tables: set[str]) -> None:
             shutil.rmtree(root)
         root.mkdir(parents=True, exist_ok=True)
 
-
+# After appending files, this function calls the PostgreSQL stored procedure to refresh the foreign table's file list. This is necessary for PostgreSQL to recognize the new files when using parquet_fdw.
 def refresh_foreign_table_files(table: str) -> None:
     data_dir = str((DATA_LAKE_DIR / table).resolve())
 

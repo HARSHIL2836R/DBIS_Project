@@ -1,0 +1,30 @@
+Query Used:
+
+//optimization seen on using gsi 
+EXPLAIN ANALYZE SELECT * FROM public.transactions
+WHERE customer_id = '';
+
+with gsi = 187 ms
+without gsi = 505ms
+
+//optimization seen on using gsi 
+EXPLAIN ANALYZE SELECT * from transactions 
+WHERE product_id = '';
+
+with gsi = 363 ms
+without gsi = 515ms
+
+
+//optimization seen on using gsi 
+EXPLAIN ANALYZE SELECT * from transactions 
+WHERE order_id = '';
+
+with gsi = 34ms
+without gsi = 541ms
+
+//optimization not seen on using gsi 
+EXPLAIN ANALYZE SELECT * from transactions 
+WHERE age = 20;
+
+with gsi = 105ms
+without gsi = 55ms

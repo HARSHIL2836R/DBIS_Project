@@ -348,6 +348,13 @@ SELECT public.register_gsi(
     '/tmp/data_lake/transactions'
 );
 
+SELECT public.register_gsi(
+    'public.transactions'::regclass,
+    'gsi_transactions_product_id',
+    'product_id',
+    '/tmp/data_lake/transactions'
+);
+
 SELECT index_name, table_name, column_name, status
 FROM public.gsi_registry
 ORDER BY index_name;

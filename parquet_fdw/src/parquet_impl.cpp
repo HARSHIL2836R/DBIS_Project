@@ -23,6 +23,8 @@
 
 extern "C" {
 #include "postgres.h"
+#include "utils/syscache.h"
+#include "catalog/pg_statistic.h"
 
 #include "access/htup_details.h"
 #include "access/nbtree.h"
@@ -149,62 +151,7 @@ static double get_column_ndistinct_from_stats(PlannerInfo *root, Oid relid, Attr
    * Try to fetch relation stats from pg_statistic.
    * This requires PostgreSQL 10+.
    */
-  Form_pg_statistic statstuple;
-  
-  statstuple = SearchSysCache(STATRELATTINH, ObjectIdGetDatum(relid),
-                              Int16GetDatum(attnum), BoolGetDatum(false), 0);
-  if (!HeapTupleIsValid(statstuple)) {
-    elog(DEBUG2, "GSI: No pg_statistic entry for relid %u attnum %d",
-         relid, attnum);
-    return ndistinct;
-  }
-  
-  Form_pg_statistic stats = (Form_pg_statistic)GETSTRUCT(statstuple);
-  
-  /*
-   * The n_distinct field in pg_statistic can be:
-   *   > 0: actual distinct count
-   *   -1.0: not computed
-   *   -0.1 to 0: fraction of total rows (e.g., -0.5 = 50% distinct)
-   */
-  ndistinct = stats->stadistinct;
-  
-  /* If it's negative, convert fraction to absolute count if we have row count */
-  if (ndistinct < 0 && ndistinct > -1.0 && root->simple_rel_array_size > 0) {
-    RelOptInfo *rel = root->simple_rel_array[0];  // Placeholder; adjust if needed
-    if (rel && rel->tuples > 0) {
-      ndistinct = fmax(1.0, rel->tuples * fabs(ndistinct));
-    } else {
-      ndistinct = -1.0;  // Can't convert; fall back to heuristic
-    }
-  }
-  
-  ReleaseSysCache(statstuple);
-  
-  elog(DEBUG2, "GSI: Fetched ndistinct = %f for relid %u attnum %d",
-       ndistinct, relid, attnum);
-#else
-  elog(DEBUG2, "GSI: PostgreSQL < 10.0; ndistinct stats unavailable");
-#endif
-  
-  return ndistinct;
-}
-
-/*
- * get_column_ndistinct_from_stats
- *      Fetch the number of distinct values for a column from PostgreSQL statistics.
- *      Uses ANALYZE-computed n_distinct if available.
- *      Returns -1.0 if no stats available (conservative: use heuristic).
- */
-static double get_column_ndistinct_from_stats(PlannerInfo *root, Oid relid, AttrNumber attnum) {
-  double ndistinct = -1.0;  // Sentinel: no stats available
-  
-#if PG_VERSION_NUM >= 100000
-  /*
-   * Try to fetch relation stats from pg_statistic.
-   * This requires PostgreSQL 10+.
-   */
-  Form_pg_statistic statstuple;
+  HeapTuple statstuple;
   
   statstuple = SearchSysCache(STATRELATTINH, ObjectIdGetDatum(relid),
                               Int16GetDatum(attnum), BoolGetDatum(false), 0);
@@ -592,13 +539,14 @@ List *extract_rowgroups_list(const char *filename, TupleDesc tupleDesc,
 
   /* Open parquet file to read meta information */
   try {
-    status = parquet::arrow::FileReader::Make(
-        arrow::default_memory_pool(),
-        parquet::ParquetFileReader::OpenFile(filename, false), &reader);
+    auto maybe_reader = parquet::arrow::FileReader::Make(
+      arrow::default_memory_pool(),
+      parquet::ParquetFileReader::OpenFile(filename, false));
 
-    if (!status.ok())
+    if (!maybe_reader.ok())
       throw Error("failed to open Parquet file: %s ('%s')",
-                  status.message().c_str(), filename);
+            maybe_reader.status().message().c_str(), filename);
+    reader = std::move(maybe_reader).ValueOrDie();
 
     auto meta = reader->parquet_reader()->metadata();
     parquet::ArrowReaderProperties props;
@@ -746,12 +694,13 @@ static List *extract_parquet_fields(const char *path) noexcept {
     arrow::Status status;
     FieldInfo *fields;
 
-    status = parquet::arrow::FileReader::Make(
-        arrow::default_memory_pool(),
-        parquet::ParquetFileReader::OpenFile(path, false), &reader);
-    if (!status.ok())
+    auto maybe_reader = parquet::arrow::FileReader::Make(
+      arrow::default_memory_pool(),
+      parquet::ParquetFileReader::OpenFile(path, false));
+    if (!maybe_reader.ok())
       throw Error("failed to open Parquet file %s ('%s')",
-                  status.message().c_str(), path);
+            maybe_reader.status().message().c_str(), path);
+    reader = std::move(maybe_reader).ValueOrDie();
 
     auto p_schema = reader->parquet_reader()->metadata()->schema();
     if (!parquet::arrow::SchemaManifest::Make(p_schema, nullptr, props,
@@ -1073,7 +1022,7 @@ extern "C" void parquetGetForeignRelSize(PlannerInfo *root, RelOptInfo *baserel,
     if (ret > 0 && SPI_processed > 0) {
       // SPI_tuptable holds the result set.
       // iterate over all rows
-      for (int i = 0; i < SPI_processed; i++) {
+      for (uint64 i = 0; i < SPI_processed; i++) {
         bool isNullName, isNullCol;
 
         // Extract table_name
@@ -1089,7 +1038,6 @@ extern "C" void parquetGetForeignRelSize(PlannerInfo *root, RelOptInfo *baserel,
           AttrNumber index_attnum =
               get_attnum(foreigntableid, gsi_column_name_str);
           bool index_used = false;
-          ListCell *lc;
           foreach (lc, baserel->baserestrictinfo) {
             RestrictInfo *rinfo = (RestrictInfo *)lfirst(lc);
             Bitmapset *clause_attrs = NULL;
@@ -2215,12 +2163,13 @@ static int parquetAcquireSampleRowsFunc(Relation relation, int /* elevel */,
       arrow::Status status;
       List *rowgroups = NIL;
 
-      status = parquet::arrow::FileReader::Make(
+      auto maybe_reader = parquet::arrow::FileReader::Make(
           arrow::default_memory_pool(),
-          parquet::ParquetFileReader::OpenFile(filename, false), &reader);
-      if (!status.ok())
+          parquet::ParquetFileReader::OpenFile(filename, false));
+      if (!maybe_reader.ok())
         throw Error("failed to open Parquet file: %s",
-                    status.message().c_str());
+                    maybe_reader.status().message().c_str());
+      reader = std::move(maybe_reader).ValueOrDie();
       auto meta = reader->parquet_reader()->metadata();
       num_rows += meta->num_rows();
 

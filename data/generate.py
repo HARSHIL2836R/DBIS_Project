@@ -1,14 +1,3 @@
-"""
-Create or append to a local Parquet data lake with three tables:
-    1. Customers: customer_id, email, region, age, loyalty_tier,
-       signup_date, total_orders, lifetime_value
-    2. Products: product_id, name, category, price, stock, brand,
-       weight_kg, rating, reviews
-    3. Transactions: order_id, customer_id, product_id, amount, quantity,
-       status, region, timestamp, payment_method, is_returned, warehouse_id,
-       shipping_days
-"""
-
 import argparse
 import math
 import os

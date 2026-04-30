@@ -14,20 +14,6 @@ def _normalize_value(value):
 
 
 def extract_index_coordinates(file_path: str, target_columns: list[str]) -> dict[str, list[dict]]:
-    """
-    Read one parquet file and return rowgroup-level postings for each indexed column.
-
-    Returned shape:
-    {
-        "age": [
-            {"value": 30, "rowgroup_ids": [0, 2]},
-            {"value": 45, "rowgroup_ids": [1]}
-        ],
-        "region": [
-            {"value": "Gujarat", "rowgroup_ids": [0, 1]}
-        ]
-    }
-    """
     if not target_columns:
         return {}
 

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from queue import Empty, Queue
+from threading import RLock
 from typing import Any
 
 import psycopg2
@@ -54,6 +56,7 @@ WATCHER_LOOP_INTERVAL = float(os.environ.get("WATCHER_LOOP_INTERVAL", "1.0"))
 REGISTRY_REFRESH_SECONDS = int(os.environ.get("REGISTRY_REFRESH_SECONDS", "60"))
 RECONCILE_SECONDS = int(os.environ.get("RECONCILE_SECONDS", "300"))
 FILE_STABLE_SECONDS = float(os.environ.get("FILE_STABLE_SECONDS", "2.0"))
+INDEX_WORKERS = max(1, int(os.environ.get("INDEX_WORKERS", "4")))
 
 DB_PARAMS = {
     "dbname": os.environ.get("DB_NAME", "postgres"),
@@ -98,6 +101,9 @@ class WatcherState:
     active_configs: dict[str, IndexConfig] = field(default_factory=dict)
     configs_by_root: dict[str, list[IndexConfig]] = field(default_factory=dict)
     watch_handles: dict[str, Any] = field(default_factory=dict)
+    in_progress_files: set[str] = field(default_factory=set)
+    running_tasks: dict[Future[Any], str] = field(default_factory=dict)
+    lock: RLock = field(default_factory=RLock)
 
 
 class DataLakeHandler(FileSystemEventHandler):
@@ -194,18 +200,19 @@ def resolve_configs_for_path(state: WatcherState, file_path: str) -> list[IndexC
 
 
 def schedule_file(state: WatcherState, file_path: str, reason: str) -> None:
-    if not resolve_configs_for_path(state, file_path):
-        return
+    with state.lock:
+        if not resolve_configs_for_path(state, file_path):
+            return
 
-    pending = state.pending_files.get(file_path)
+        pending = state.pending_files.get(file_path)
 
-    if pending is None:
-        state.pending_files[file_path] = PendingFile(reason=reason)
-        return
+        if pending is None:
+            state.pending_files[file_path] = PendingFile(reason=reason)
+            return
 
-    pending.reason = reason
-    pending.last_signature = None
-    pending.stable_since = None
+        pending.reason = reason
+        pending.last_signature = None
+        pending.stable_since = None
 
 
 def queue_paths_from_db(conn, state: WatcherState) -> None:
@@ -233,15 +240,21 @@ def queue_paths_from_db(conn, state: WatcherState) -> None:
 
 
 def sync_observer_paths(state: WatcherState) -> None:
-    active_roots = set(state.configs_by_root)
+    with state.lock:
+        active_roots = set(state.configs_by_root)
+        watched_roots = set(state.watch_handles)
 
-    for root in sorted(active_roots - set(state.watch_handles)):
+    for root in sorted(active_roots - watched_roots):
         os.makedirs(root, exist_ok=True)
-        state.watch_handles[root] = state.observer.schedule(state.handler, root, recursive=True)
+        with state.lock:
+            state.watch_handles[root] = state.observer.schedule(state.handler, root, recursive=True)
         print(f"Watching parquet root: {root}")
 
-    for root in sorted(set(state.watch_handles) - active_roots):
-        state.observer.unschedule(state.watch_handles.pop(root))
+    for root in sorted(watched_roots - active_roots):
+        with state.lock:
+            handle = state.watch_handles.pop(root, None)
+        if handle is not None:
+            state.observer.unschedule(handle)
         print(f"Stopped watching parquet root: {root}")
 
 
@@ -309,23 +322,24 @@ def handle_dropping_indexes(conn) -> None:
 
 def load_active_registry(conn, state: WatcherState) -> None:
     registry_rows = fetch_registry_rows(conn, ("building", "ready"))
-    state.active_configs = {
-        row["index_name"]: index_config_from_row(row) for row in registry_rows
-    }
+    with state.lock:
+        state.active_configs = {
+            row["index_name"]: index_config_from_row(row) for row in registry_rows
+        }
 
-    configs_by_root: dict[str, list[IndexConfig]] = {}
+        configs_by_root: dict[str, list[IndexConfig]] = {}
 
-    for config in state.active_configs.values():
-        configs_by_root.setdefault(config.data_lake_path, []).append(config)
+        for config in state.active_configs.values():
+            configs_by_root.setdefault(config.data_lake_path, []).append(config)
 
-    state.configs_by_root = {
-        root: sorted(configs, key=lambda item: item.index_name)
-        for root, configs in configs_by_root.items()
-    }
+        state.configs_by_root = {
+            root: sorted(configs, key=lambda item: item.index_name)
+            for root, configs in configs_by_root.items()
+        }
 
-    for file_path in list(state.pending_files):
-        if not resolve_configs_for_path(state, file_path):
-            state.pending_files.pop(file_path, None)
+        for file_path in list(state.pending_files):
+            if not resolve_configs_for_path(state, file_path):
+                state.pending_files.pop(file_path, None)
 
 
 def list_parquet_files(root: str) -> list[str]:
@@ -738,17 +752,24 @@ def refresh_registry(state: WatcherState) -> None:
 
 
 def reconcile_all_paths(state: WatcherState) -> None:
-    if not state.configs_by_root:
+    with state.lock:
+        roots_snapshot = {
+            root: list(configs) for root, configs in state.configs_by_root.items()
+        }
+
+    if not roots_snapshot:
         return
 
     with get_connection() as conn:
-        for root, configs in state.configs_by_root.items():
+        for root, configs in roots_snapshot.items():
             print(f"Reconciling parquet root: {root}")
             reconcile_root(conn, state, root, configs)
 
 
 def handle_delete_event(state: WatcherState, file_path: str) -> None:
-    state.pending_files.pop(file_path, None)
+    with state.lock:
+        state.pending_files.pop(file_path, None)
+        state.in_progress_files.discard(file_path)
 
     with get_connection() as conn:
         cleanup_deleted_file(conn, file_path)
@@ -772,16 +793,21 @@ def drain_event_queue(state: WatcherState) -> None:
 
 
 def process_file(state: WatcherState, file_path: str) -> None:
-    configs = resolve_configs_for_path(state, file_path)
+    with state.lock:
+        configs = list(resolve_configs_for_path(state, file_path))
 
     if not configs:
-        state.pending_files.pop(file_path, None)
+        with state.lock:
+            state.pending_files.pop(file_path, None)
+            state.in_progress_files.discard(file_path)
         return
 
     try:
         stat_result = os.stat(file_path)
     except FileNotFoundError:
-        state.pending_files.pop(file_path, None)
+        with state.lock:
+            state.pending_files.pop(file_path, None)
+            state.in_progress_files.discard(file_path)
         handle_delete_event(state, file_path)
         return
 
@@ -812,7 +838,9 @@ def process_file(state: WatcherState, file_path: str) -> None:
             conn.commit()
 
         print(f"Index extraction failed for {file_path}: {error_message}")
-        state.pending_files.pop(file_path, None)
+        with state.lock:
+            state.pending_files.pop(file_path, None)
+            state.in_progress_files.discard(file_path)
         return
 
     try:
@@ -854,18 +882,49 @@ def process_file(state: WatcherState, file_path: str) -> None:
 
         print(f"PostgreSQL GSI write failed for {file_path}: {error_message}")
 
-    state.pending_files.pop(file_path, None)
+    with state.lock:
+        state.pending_files.pop(file_path, None)
+        state.in_progress_files.discard(file_path)
 
 
-def process_stable_files(state: WatcherState) -> None:
+def collect_completed_tasks(state: WatcherState) -> None:
+    with state.lock:
+        done_futures = [future for future in state.running_tasks if future.done()]
+
+    for future in done_futures:
+        with state.lock:
+            file_path = state.running_tasks.pop(future, None)
+
+        if file_path is None:
+            continue
+
+        try:
+            future.result()
+        except Exception as exc:
+            print(f"Worker crashed for {file_path}: {exc}")
+            with state.lock:
+                state.pending_files.pop(file_path, None)
+                state.in_progress_files.discard(file_path)
+
+
+def process_stable_files(state: WatcherState, executor: ThreadPoolExecutor) -> None:
     now = time.time()
     ready_paths = []
 
-    for file_path, pending in list(state.pending_files.items()):
+    with state.lock:
+        pending_items = list(state.pending_files.items())
+
+    for file_path, pending in pending_items:
+        with state.lock:
+            if file_path in state.in_progress_files:
+                continue
+
         try:
             stat_result = os.stat(file_path)
         except FileNotFoundError:
-            state.pending_files.pop(file_path, None)
+            with state.lock:
+                state.pending_files.pop(file_path, None)
+                state.in_progress_files.discard(file_path)
             handle_delete_event(state, file_path)
             continue
 
@@ -884,7 +943,15 @@ def process_stable_files(state: WatcherState) -> None:
             ready_paths.append(file_path)
 
     for file_path in sorted(ready_paths):
-        process_file(state, file_path)
+        with state.lock:
+            if file_path in state.in_progress_files:
+                continue
+            if len(state.running_tasks) >= INDEX_WORKERS:
+                break
+
+            state.in_progress_files.add(file_path)
+            future = executor.submit(process_file, state, file_path)
+            state.running_tasks[future] = file_path
 
 
 def start_watcher() -> None:
@@ -903,15 +970,17 @@ def start_watcher() -> None:
     reconcile_all_paths(state)
     observer.start()
 
-    print("Watcher daemon started.")
+    print(f"Watcher daemon started with {INDEX_WORKERS} worker(s).")
 
     next_registry_refresh = time.time() + REGISTRY_REFRESH_SECONDS
     next_reconcile = time.time() + RECONCILE_SECONDS
+    executor = ThreadPoolExecutor(max_workers=INDEX_WORKERS, thread_name_prefix="gsi-worker")
 
     try:
         while True:
             drain_event_queue(state)
-            process_stable_files(state)
+            collect_completed_tasks(state)
+            process_stable_files(state, executor)
 
             now = time.time()
 
@@ -929,6 +998,7 @@ def start_watcher() -> None:
     finally:
         observer.stop()
         observer.join()
+        executor.shutdown(wait=True)
 
 
 if __name__ == "__main__":

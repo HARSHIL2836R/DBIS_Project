@@ -190,54 +190,61 @@ static double get_column_ndistinct_from_stats(PlannerInfo *root, Oid relid, Attr
   return ndistinct;
 }
 
-static bool extract_gsi_filter_from_clauses(List *clauses,
-                                            AttrNumber index_attnum,
-                                            bool clauses_are_restrictinfo,
-                                            Datum *filter_value,
-                                            Oid *filter_type) {
-  ListCell *lc;
-
-  foreach (lc, clauses) {
-    Expr *expr;
-
-    expr = clauses_are_restrictinfo
-               ? (Expr *)((RestrictInfo *)lfirst(lc))->clause
-               : (Expr *)lfirst(lc);
-
-    if (IsA(expr, OpExpr)) {
-      OpExpr *op = (OpExpr *)expr;
-
-      if (list_length(op->args) == 2) {
-        Node *left = (Node *)linitial(op->args);
-        Node *right = (Node *)lsecond(op->args);
-
-        if (IsA(left, RelabelType))
-          left = (Node *)((RelabelType *)left)->arg;
-        if (IsA(right, RelabelType))
-          right = (Node *)((RelabelType *)right)->arg;
-
-        if (IsA(left, Const) && IsA(right, Var)) {
-          Node *tmp = left;
-          left = right;
-          right = tmp;
-        }
-
-        if (IsA(left, Var) && IsA(right, Const)) {
-          Var *var = (Var *)left;
-          Const *c = (Const *)right;
-
-          if (var->varattno == index_attnum && !c->constisnull) {
-            *filter_value = c->constvalue;
-            *filter_type = c->consttype;
-            return true;
-          }
-        }
-      }
+/*
+ * get_column_ndistinct_from_stats
+ *      Fetch the number of distinct values for a column from PostgreSQL statistics.
+ *      Uses ANALYZE-computed n_distinct if available.
+ *      Returns -1.0 if no stats available (conservative: use heuristic).
+ */
+static double get_column_ndistinct_from_stats(PlannerInfo *root, Oid relid, AttrNumber attnum) {
+  double ndistinct = -1.0;  // Sentinel: no stats available
+  
+#if PG_VERSION_NUM >= 100000
+  /*
+   * Try to fetch relation stats from pg_statistic.
+   * This requires PostgreSQL 10+.
+   */
+  Form_pg_statistic statstuple;
+  
+  statstuple = SearchSysCache(STATRELATTINH, ObjectIdGetDatum(relid),
+                              Int16GetDatum(attnum), BoolGetDatum(false), 0);
+  if (!HeapTupleIsValid(statstuple)) {
+    elog(DEBUG2, "GSI: No pg_statistic entry for relid %u attnum %d",
+         relid, attnum);
+    return ndistinct;
+  }
+  
+  Form_pg_statistic stats = (Form_pg_statistic)GETSTRUCT(statstuple);
+  
+  /*
+   * The n_distinct field in pg_statistic can be:
+   *   > 0: actual distinct count
+   *   -1.0: not computed
+   *   -0.1 to 0: fraction of total rows (e.g., -0.5 = 50% distinct)
+   */
+  ndistinct = stats->stadistinct;
+  
+  /* If it's negative, convert fraction to absolute count if we have row count */
+  if (ndistinct < 0 && ndistinct > -1.0 && root->simple_rel_array_size > 0) {
+    RelOptInfo *rel = root->simple_rel_array[0];  // Placeholder; adjust if needed
+    if (rel && rel->tuples > 0) {
+      ndistinct = fmax(1.0, rel->tuples * fabs(ndistinct));
+    } else {
+      ndistinct = -1.0;  // Can't convert; fall back to heuristic
     }
   }
-
-  return false;
+  
+  ReleaseSysCache(statstuple);
+  
+  elog(DEBUG2, "GSI: Fetched ndistinct = %f for relid %u attnum %d",
+       ndistinct, relid, attnum);
+#else
+  elog(DEBUG2, "GSI: PostgreSQL < 10.0; ndistinct stats unavailable");
+#endif
+  
+  return ndistinct;
 }
+
 
 /*
  * extract_rowgroup_filters

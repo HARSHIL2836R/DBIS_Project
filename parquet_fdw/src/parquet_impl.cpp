@@ -1423,120 +1423,41 @@ extern "C" void parquetGetForeignPaths(PlannerInfo *root, RelOptInfo *baserel,
            sizeof(ParquetFdwPlanState)); // copy base state
     gsi_private->is_gsi = true;          // chosen gsi;
 
-    /*
-     * GSI Cost Model (accurate version)
-     * ------------------------------------
-     * Key insight: the GSI works at ROW GROUP granularity. It tells us which
-     * row groups to read, but we must still scan every row inside those groups.
-     * Therefore the dominant run cost is proportional to the number of rows
-     * in the GSI-selected row groups, NOT to the output row count.
-     *
-     * At planning time we estimate:
-     *
-     *   rows_in_GSI_selected_groups
-     *       ≈ fdw_private->matched_rows   (worst case: GSI = min/max)
-     *         * gsi_rg_selectivity        (fraction of row groups GSI skips)
-     *
-     * gsi_rg_selectivity:
-     *   The GSI can skip a row group only if the predicate value is entirely
-     *   absent from that group. For a uniformly distributed column with NDV
-     *   distinct values spread across G groups, each group contains on average
-     *   NDV values → GSI selects ALL groups → selectivity = 1 (no benefit).
-     *   For a perfectly partitioned column (each group holds one value) →
-     *   GSI selects 1/NDV groups.
-     *
-     *   We don't have NDV here, but we can bound it:
-     *     lower bound: gsi_selectivity      (predicate selectivity ≈ 1/NDV)
-     *     upper bound: 1.0                  (no benefit over min/max)
-     *
-     *   Conservative planning estimate: sqrt(gsi_selectivity), which is
-     *   between the two extremes. This errs on the side of NOT choosing GSI
-     *   unless it is clearly better — avoiding the case where a falsely cheap
-     *   GSI cost beats a parallel scan it cannot actually beat in reality.
-     *
-     * cpu_cost: also based on rows_in_GSI_selected_groups since every row
-     * must be fetched and checked for the predicate even after row-group
-     * pruning (parquet has no intra-group index).
-     */
     double gsi_selectivity =
         (baserel->tuples > 0) ? (baserel->rows / baserel->tuples) : 1.0;
 
-    /*
-     * Fraction of row groups (and their rows) the GSI expects to read.
-     * 
-     * IMPROVED: Try to use ANALYZE-computed n_distinct stats instead of sqrt heuristic.
-     * The logic: if a column has NDV distinct values spread across row-groups,
-     * the GSI can skip at most 1 - (selectivity / NDV) fraction of row-groups.
-     * 
-     * Fallback: If no stats available, use sqrt(selectivity) as conservative estimate.
-     * Clamp to [gsi_selectivity, 1.0].
-     */
     RangeTblEntry *gsi_rte = root->simple_rte_array[baserel->relid];
     Oid gsi_relid = gsi_rte->relid;
-    
-    double gsi_rg_selectivity = 1.0;  // Default: no row-group skipping
-    
-    /* Try to get the first usable GSI index's attnum to fetch stats */
-    if (fdw_private->usable_gsi_attrs && list_length(fdw_private->usable_gsi_attrs) > 0) {
+    double gsi_rg_selectivity = 1.0;
+
+    if (fdw_private->usable_gsi_attrs &&
+        list_length(fdw_private->usable_gsi_attrs) > 0) {
       List *first_gsi = (List *)linitial(fdw_private->usable_gsi_attrs);
       AttrNumber index_attnum = (AttrNumber)intVal(lsecond(first_gsi));
-      
-      double ndistinct = get_column_ndistinct_from_stats(root, gsi_relid, index_attnum);
-      
-      if (ndistinct > 0) {
-        /* Use NDV-based selectivity: how many rowgroups will be skipped? */
+      double ndistinct =
+          get_column_ndistinct_from_stats(root, gsi_relid, index_attnum);
+
+      if (ndistinct > 0)
         gsi_rg_selectivity = fmin(1.0, gsi_selectivity / ndistinct);
-        elog(DEBUG1, "GSI: Using NDV-based rg_selectivity = %f (ndistinct=%f, selectivity=%f)",
-             gsi_rg_selectivity, ndistinct, gsi_selectivity);
-      } else {
-        /* No stats available; fall back to sqrt heuristic */
+      else
         gsi_rg_selectivity = sqrt(gsi_selectivity);
-        elog(DEBUG1, "GSI: No ANALYZE stats available; using sqrt heuristic (rg_selectivity=%f)",
-             gsi_rg_selectivity);
-      }
     } else {
-      /* No GSI indexes; use sqrt heuristic */
       gsi_rg_selectivity = sqrt(gsi_selectivity);
-      elog(DEBUG1, "GSI: No usable GSI attrs; using sqrt heuristic (rg_selectivity=%f)",
-           gsi_rg_selectivity);
     }
-    
-    /* Clamp to valid range [gsi_selectivity, 1.0] */
+
     if (gsi_rg_selectivity > 1.0)
       gsi_rg_selectivity = 1.0;
     if (gsi_rg_selectivity < gsi_selectivity)
       gsi_rg_selectivity = gsi_selectivity;
 
-    /* Estimated rows we will physically touch (inside selected row groups) */
-    double gsi_rows_to_scan = fdw_private->matched_rows * gsi_rg_selectivity;
-
-    /* startup: B+ tree index lookup (small, a few random page fetches) */
     Cost gsi_startup_cost = startup_cost + random_page_cost * 2;
-
-    /*
-     * CPU cost: iterate every row in the selected row groups.
-     * This is the dominant term, just like for a regular sequential scan
-     * except over fewer groups.
-     */
-    Cost gsi_cpu_cost = gsi_rows_to_scan * cpu_tuple_cost;
-
-    /*
-     * IO cost: sequential reads within each selected row group.
-     * Use seq_page_cost (not random_page_cost) because within a chunk the
-     * access is sequential. 0.1 = rough pages-per-row factor for columnar
-     * Parquet data (actual value depends on row-group size / column widths).
-     */
-    Cost gsi_io_cost = gsi_rows_to_scan * seq_page_cost * 0.1;
-
-    Cost gsi_total_cost = gsi_startup_cost + gsi_cpu_cost + gsi_io_cost;
+    Cost gsi_total_cost = gsi_startup_cost + run_cost * gsi_rg_selectivity;
 
     elog(DEBUG1,
-         "Parquet FDW: GSI path cost estimation - startup: %f, cpu: %f, "
-         "io: %f, total: %f (gsi_selectivity: %f, rg_selectivity: %f, "
-         "matched_rows: %lu, gsi_rows_to_scan: %f)",
-         gsi_startup_cost, gsi_cpu_cost, gsi_io_cost, gsi_total_cost,
-         gsi_selectivity, gsi_rg_selectivity,
-         (unsigned long)fdw_private->matched_rows, gsi_rows_to_scan);
+         "Parquet FDW: GSI path cost estimation - startup: %f, total: %f "
+         "(base_total: %f, gsi_selectivity: %f, rg_selectivity: %f)",
+         gsi_startup_cost, gsi_total_cost, total_cost, gsi_selectivity,
+         gsi_rg_selectivity);
 
     double gsi_rows = baserel->rows;
 
@@ -1569,7 +1490,7 @@ extern "C" void parquetGetForeignPaths(PlannerInfo *root, RelOptInfo *baserel,
        *   + parallel_tuple_cost * gsi_rows  <  gsi_total_cost
        * i.e. the Gather plan is cheaper than the serial GSI plan.
        */
-      Cost gsi_run_cost = gsi_cpu_cost + gsi_io_cost;
+      Cost gsi_run_cost = gsi_total_cost - gsi_startup_cost;
       Cost gsi_parallel_total_cost =
           gsi_startup_cost + gsi_run_cost / (num_workers + 1);
 

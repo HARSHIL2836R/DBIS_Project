@@ -820,7 +820,9 @@ def process_file(state: WatcherState, file_path: str) -> None:
 
         if not pending_configs:
             conn.commit()
-            state.pending_files.pop(file_path, None)
+            with state.lock:
+                state.pending_files.pop(file_path, None)
+                state.in_progress_files.discard(file_path)
             return
 
         mark_index_states(conn, pending_configs, file_id, "indexing")
@@ -889,16 +891,18 @@ def process_file(state: WatcherState, file_path: str) -> None:
 
 
 def collect_completed_tasks(state: WatcherState) -> None:
+    # Snapshot done futures and remove them from running_tasks in one lock
+    # acquisition instead of one acquisition per completed future.
     with state.lock:
-        done_futures = [future for future in state.running_tasks if future.done()]
+        completed = {
+            future: fp
+            for future, fp in state.running_tasks.items()
+            if future.done()
+        }
+        for future in completed:
+            state.running_tasks.pop(future, None)
 
-    for future in done_futures:
-        with state.lock:
-            file_path = state.running_tasks.pop(future, None)
-
-        if file_path is None:
-            continue
-
+    for future, file_path in completed.items():
         try:
             future.result()
         except Exception as exc:
@@ -912,14 +916,16 @@ def process_stable_files(state: WatcherState, executor: ThreadPoolExecutor) -> N
     now = time.time()
     ready_paths = []
 
+    # Single snapshot: also exclude already-in-progress files here to avoid a
+    # second per-file lock acquisition in the loop below.
     with state.lock:
-        pending_items = list(state.pending_files.items())
+        pending_snapshot = [
+            (fp, pf)
+            for fp, pf in state.pending_files.items()
+            if fp not in state.in_progress_files
+        ]
 
-    for file_path, pending in pending_items:
-        with state.lock:
-            if file_path in state.in_progress_files:
-                continue
-
+    for file_path, pending in pending_snapshot:
         try:
             stat_result = os.stat(file_path)
         except FileNotFoundError:
@@ -931,46 +937,53 @@ def process_stable_files(state: WatcherState, executor: ThreadPoolExecutor) -> N
 
         signature = (stat_result.st_size, stat_result.st_mtime_ns)
 
-        if pending.last_signature != signature:
-            pending.last_signature = signature
-            pending.stable_since = now
-            continue
-
-        if pending.stable_since is None:
-            pending.stable_since = now
-            continue
-
-        if now - pending.stable_since >= FILE_STABLE_SECONDS:
-            ready_paths.append(file_path)
-
-    for file_path in sorted(ready_paths):
+        # Mutate PendingFile fields inside the lock to avoid a data race with
+        # workers that call pending_files.pop() / in_progress_files.discard().
         with state.lock:
+            pending = state.pending_files.get(file_path)
+            if pending is None:
+                continue
+            if pending.last_signature != signature:
+                pending.last_signature = signature
+                pending.stable_since = now
+                continue
+            if pending.stable_since is None:
+                pending.stable_since = now
+                continue
+            if now - pending.stable_since >= FILE_STABLE_SECONDS:
+                ready_paths.append(file_path)
+
+    # Dispatch: check + add + submit in one atomic block to prevent the same
+    # file being submitted twice across loop iterations (TOCTOU).
+    with state.lock:
+        for file_path in sorted(ready_paths):
             if file_path in state.in_progress_files:
                 continue
             if len(state.running_tasks) >= INDEX_WORKERS:
                 break
-
             state.in_progress_files.add(file_path)
             future = executor.submit(process_file, state, file_path)
             state.running_tasks[future] = file_path
 
 
 def log_queue_completion_once(state: WatcherState) -> None:
+    # Queue may receive filesystem events asynchronously, so check it before
+    # acquiring the lock to avoid a needless acquisition when there is work.
+    if not state.event_queue.empty():
+        with state.lock:
+            state.queue_complete_logged = False
+        return
+
+    # Single lock acquisition: has_work check and queue_complete_logged write
+    # are now atomic, preventing a spurious "queue complete" log if a worker
+    # finishes between two separate acquisitions.
     with state.lock:
         has_work = bool(state.pending_files or state.in_progress_files or state.running_tasks)
-
-    # Queue may receive filesystem events asynchronously, so include that in idle detection.
-    if not has_work and not state.event_queue.empty():
-        has_work = True
-
-    with state.lock:
         if has_work:
             state.queue_complete_logged = False
             return
-
         if state.queue_complete_logged:
             return
-
         state.queue_complete_logged = True
 
     print("Queue complete. Waiting for new files...")

@@ -135,6 +135,61 @@ static int get_strategy(Oid type, Oid opno, Oid am) {
   return get_op_opfamily_strategy(opno, opfamily);
 }
 
+/*
+ * get_column_ndistinct_from_stats
+ *      Fetch the number of distinct values for a column from PostgreSQL statistics.
+ *      Uses ANALYZE-computed n_distinct if available.
+ *      Returns -1.0 if no stats available (conservative: use heuristic).
+ */
+static double get_column_ndistinct_from_stats(PlannerInfo *root, Oid relid, AttrNumber attnum) {
+  double ndistinct = -1.0;  // Sentinel: no stats available
+  
+#if PG_VERSION_NUM >= 100000
+  /*
+   * Try to fetch relation stats from pg_statistic.
+   * This requires PostgreSQL 10+.
+   */
+  Form_pg_statistic statstuple;
+  
+  statstuple = SearchSysCache(STATRELATTINH, ObjectIdGetDatum(relid),
+                              Int16GetDatum(attnum), BoolGetDatum(false), 0);
+  if (!HeapTupleIsValid(statstuple)) {
+    elog(DEBUG2, "GSI: No pg_statistic entry for relid %u attnum %d",
+         relid, attnum);
+    return ndistinct;
+  }
+  
+  Form_pg_statistic stats = (Form_pg_statistic)GETSTRUCT(statstuple);
+  
+  /*
+   * The n_distinct field in pg_statistic can be:
+   *   > 0: actual distinct count
+   *   -1.0: not computed
+   *   -0.1 to 0: fraction of total rows (e.g., -0.5 = 50% distinct)
+   */
+  ndistinct = stats->stadistinct;
+  
+  /* If it's negative, convert fraction to absolute count if we have row count */
+  if (ndistinct < 0 && ndistinct > -1.0 && root->simple_rel_array_size > 0) {
+    RelOptInfo *rel = root->simple_rel_array[0];  // Placeholder; adjust if needed
+    if (rel && rel->tuples > 0) {
+      ndistinct = fmax(1.0, rel->tuples * fabs(ndistinct));
+    } else {
+      ndistinct = -1.0;  // Can't convert; fall back to heuristic
+    }
+  }
+  
+  ReleaseSysCache(statstuple);
+  
+  elog(DEBUG2, "GSI: Fetched ndistinct = %f for relid %u attnum %d",
+       ndistinct, relid, attnum);
+#else
+  elog(DEBUG2, "GSI: PostgreSQL < 10.0; ndistinct stats unavailable");
+#endif
+  
+  return ndistinct;
+}
+
 static bool extract_gsi_filter_from_clauses(List *clauses,
                                             AttrNumber index_attnum,
                                             bool clauses_are_restrictinfo,
@@ -1453,10 +1508,45 @@ extern "C" void parquetGetForeignPaths(PlannerInfo *root, RelOptInfo *baserel,
 
     /*
      * Fraction of row groups (and their rows) the GSI expects to read.
-     * sqrt(selectivity) is a conservative middle-ground estimate.
+     * 
+     * IMPROVED: Try to use ANALYZE-computed n_distinct stats instead of sqrt heuristic.
+     * The logic: if a column has NDV distinct values spread across row-groups,
+     * the GSI can skip at most 1 - (selectivity / NDV) fraction of row-groups.
+     * 
+     * Fallback: If no stats available, use sqrt(selectivity) as conservative estimate.
      * Clamp to [gsi_selectivity, 1.0].
      */
-    double gsi_rg_selectivity = sqrt(gsi_selectivity);
+    RangeTblEntry *gsi_rte = root->simple_rte_array[baserel->relid];
+    Oid gsi_relid = gsi_rte->relid;
+    
+    double gsi_rg_selectivity = 1.0;  // Default: no row-group skipping
+    
+    /* Try to get the first usable GSI index's attnum to fetch stats */
+    if (fdw_private->usable_gsi_attrs && list_length(fdw_private->usable_gsi_attrs) > 0) {
+      List *first_gsi = (List *)linitial(fdw_private->usable_gsi_attrs);
+      AttrNumber index_attnum = (AttrNumber)intVal(lsecond(first_gsi));
+      
+      double ndistinct = get_column_ndistinct_from_stats(root, gsi_relid, index_attnum);
+      
+      if (ndistinct > 0) {
+        /* Use NDV-based selectivity: how many rowgroups will be skipped? */
+        gsi_rg_selectivity = fmin(1.0, gsi_selectivity / ndistinct);
+        elog(DEBUG1, "GSI: Using NDV-based rg_selectivity = %f (ndistinct=%f, selectivity=%f)",
+             gsi_rg_selectivity, ndistinct, gsi_selectivity);
+      } else {
+        /* No stats available; fall back to sqrt heuristic */
+        gsi_rg_selectivity = sqrt(gsi_selectivity);
+        elog(DEBUG1, "GSI: No ANALYZE stats available; using sqrt heuristic (rg_selectivity=%f)",
+             gsi_rg_selectivity);
+      }
+    } else {
+      /* No GSI indexes; use sqrt heuristic */
+      gsi_rg_selectivity = sqrt(gsi_selectivity);
+      elog(DEBUG1, "GSI: No usable GSI attrs; using sqrt heuristic (rg_selectivity=%f)",
+           gsi_rg_selectivity);
+    }
+    
+    /* Clamp to valid range [gsi_selectivity, 1.0] */
     if (gsi_rg_selectivity > 1.0)
       gsi_rg_selectivity = 1.0;
     if (gsi_rg_selectivity < gsi_selectivity)

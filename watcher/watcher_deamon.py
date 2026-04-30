@@ -103,6 +103,7 @@ class WatcherState:
     watch_handles: dict[str, Any] = field(default_factory=dict)
     in_progress_files: set[str] = field(default_factory=set)
     running_tasks: dict[Future[Any], str] = field(default_factory=dict)
+    queue_complete_logged: bool = False
     lock: RLock = field(default_factory=RLock)
 
 
@@ -954,6 +955,27 @@ def process_stable_files(state: WatcherState, executor: ThreadPoolExecutor) -> N
             state.running_tasks[future] = file_path
 
 
+def log_queue_completion_once(state: WatcherState) -> None:
+    with state.lock:
+        has_work = bool(state.pending_files or state.in_progress_files or state.running_tasks)
+
+    # Queue may receive filesystem events asynchronously, so include that in idle detection.
+    if not has_work and not state.event_queue.empty():
+        has_work = True
+
+    with state.lock:
+        if has_work:
+            state.queue_complete_logged = False
+            return
+
+        if state.queue_complete_logged:
+            return
+
+        state.queue_complete_logged = True
+
+    print("Queue complete. Waiting for new files...")
+
+
 def start_watcher() -> None:
     observer = Observer()
     state = WatcherState(
@@ -991,6 +1013,8 @@ def start_watcher() -> None:
             if now >= next_reconcile:
                 reconcile_all_paths(state)
                 next_reconcile = now + RECONCILE_SECONDS
+
+            log_queue_completion_once(state)
 
             time.sleep(WATCHER_LOOP_INTERVAL)
     except KeyboardInterrupt:

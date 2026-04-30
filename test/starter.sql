@@ -341,6 +341,23 @@ SELECT public.register_gsi(
     '/tmp/data_lake/transactions'
 );
 
+SELECT public.register_gsi(
+    'public.transactions'::regclass,
+    'gsi_transactions_order_id',
+    'order_id',
+    '/tmp/data_lake/transactions'
+);
+
 SELECT index_name, table_name, column_name, status
 FROM public.gsi_registry
 ORDER BY index_name;
+
+EXPLAIN ANALYZE SELECT * FROM public.customers WHERE age = 30;
+
+EXPLAIN ANALYZE
+SELECT * FROM public.transactions
+WHERE customer_id = '21a6607b1790f22eba088795b6c54e57';
+
+EXPLAIN ANALYZE
+SELECT * FROM public.transactions
+WHERE order_id = '1f6f92afdb4baa8a09a733ebd0616fea';

@@ -1,3 +1,0 @@
-/home/dhruvraj/Desktop/DBMS/DBIS_Project/parquet_extraction_engine/build/CMakeFiles/extractor.dir
-/home/dhruvraj/Desktop/DBMS/DBIS_Project/parquet_extraction_engine/build/CMakeFiles/edit_cache.dir
-/home/dhruvraj/Desktop/DBMS/DBIS_Project/parquet_extraction_engine/build/CMakeFiles/rebuild_cache.dir

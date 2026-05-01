@@ -190,5 +190,16 @@ Gather  (cost=1008.00..12841.33 rows=50000 width=245)
 Planning Time: 3.843 ms
 Execution Time: 318.543 ms
 \end{verbatim}
-
+\section{How to Test Code}
+Use PostgresQL 16 and Python 3 on Ubuntu
+\begin{itemize}
+    \item Mount the 'data\_lake' directory to '/tmp/data\_lake'
+    \item Make python environment using 'requirement.txt' and activate it. Also run 'pip3 install psycopg2-binary watchdog' for watcher, read 'watcher/watcher\_setup.md'
+    \item Run 'new\_files/data/generate.py' to generate data (Data size is by default set to medium, can change using arguments given in file)
+    \item Run 'sudo make install' inside 'modified\_parquet\_fdw'
+    \item Customize watcher/.env file and run 'watcher\_daemon.py', this will add indices from generated parquet files. Keep the code running and continue on new terminal.
+    \item Log into a new database and run '\i test/starter.sql' in psql, this creates index tables required for gsi and runs tests using analyse queries (see the code for comments in it)
+    \item Thank You!
+    
+\end{itemize}
 \end{document}

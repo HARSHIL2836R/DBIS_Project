@@ -425,18 +425,18 @@ ORDER BY index_name;
 -- These queries test the effectiveness of the secondary indexes by showing
 -- the query execution plan and actual execution statistics.
 
--- TEST 5: Query customers by age (using gsi_customers_age index)
--- Expected: Should use the age index for faster filtering instead of full scan
-EXPLAIN ANALYZE SELECT * FROM public.customers WHERE age = 30;
-
--- TEST 6: Query transactions by customer ID (using gsi_transactions_customer_id index)
+-- TEST 5: Query transactions by customer ID (using gsi_transactions_customer_id index)
 -- Expected: Should use the customer_id index to quickly find all orders for a customer
 EXPLAIN ANALYZE
 SELECT * FROM public.transactions
 WHERE customer_id = '21a6607b1790f22eba088795b6c54e57';
 
--- TEST 7: Query transactions by order ID (using gsi_transactions_order_id index)
+-- TEST 6: Query transactions by order ID (using gsi_transactions_order_id index)
 -- Expected: Should use the order_id index to retrieve a specific order quickly
 EXPLAIN ANALYZE
 SELECT * FROM public.transactions
 WHERE order_id = '1f6f92afdb4baa8a09a733ebd0616fea';
+
+-- TEST 7: Query customers by age (using gsi_customers_age index)
+-- Expected: Should use the age index for faster filtering instead of full scan
+EXPLAIN ANALYZE SELECT * FROM public.customers WHERE age = 30;

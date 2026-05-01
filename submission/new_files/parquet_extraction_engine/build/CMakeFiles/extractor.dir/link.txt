@@ -1,1 +1,0 @@
-/usr/bin/c++ CMakeFiles/extractor.dir/main.cpp.o -o extractor  /usr/lib/x86_64-linux-gnu/libparquet.so.2300.1.0 /usr/lib/x86_64-linux-gnu/libarrow.so.2300.1.0 -ldl -lrt 

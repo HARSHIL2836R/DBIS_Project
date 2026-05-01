@@ -98,6 +98,7 @@ class WatcherState:
     handler: FileSystemEventHandler
     event_queue: Queue[FileEvent] = field(default_factory=Queue)
     pending_files: dict[str, PendingFile] = field(default_factory=dict)
+    pending_deletes: set[str] = field(default_factory=set)
     active_configs: dict[str, IndexConfig] = field(default_factory=dict)
     configs_by_root: dict[str, list[IndexConfig]] = field(default_factory=dict)
     watch_handles: dict[str, Any] = field(default_factory=dict)
@@ -202,6 +203,8 @@ def resolve_configs_for_path(state: WatcherState, file_path: str) -> list[IndexC
 
 def schedule_file(state: WatcherState, file_path: str, reason: str) -> None:
     with state.lock:
+        state.pending_deletes.discard(file_path)
+
         if not resolve_configs_for_path(state, file_path):
             return
 
@@ -214,6 +217,12 @@ def schedule_file(state: WatcherState, file_path: str, reason: str) -> None:
         pending.reason = reason
         pending.last_signature = None
         pending.stable_since = None
+
+
+def schedule_delete(state: WatcherState, file_path: str) -> None:
+    with state.lock:
+        state.pending_files.pop(file_path, None)
+        state.pending_deletes.add(file_path)
 
 
 def queue_paths_from_db(conn, state: WatcherState) -> None:
@@ -768,15 +777,24 @@ def reconcile_all_paths(state: WatcherState) -> None:
 
 
 def handle_delete_event(state: WatcherState, file_path: str) -> None:
-    with state.lock:
-        state.pending_files.pop(file_path, None)
-        state.in_progress_files.discard(file_path)
+    try:
+        with state.lock:
+            state.pending_files.pop(file_path, None)
 
-    with get_connection() as conn:
-        cleanup_deleted_file(conn, file_path)
-        conn.commit()
+        if os.path.exists(file_path):
+            schedule_file(state, file_path, "recreated-during-delete")
+            print(f"Skipped delete cleanup because parquet file reappeared: {file_path}")
+            return
 
-    print(f"Removed stale GSI rows for deleted parquet file: {file_path}")
+        with get_connection() as conn:
+            cleanup_deleted_file(conn, file_path)
+            conn.commit()
+
+        print(f"Removed stale GSI rows for deleted parquet file: {file_path}")
+    finally:
+        with state.lock:
+            state.pending_deletes.discard(file_path)
+            state.in_progress_files.discard(file_path)
 
 
 def drain_event_queue(state: WatcherState) -> None:
@@ -787,7 +805,7 @@ def drain_event_queue(state: WatcherState) -> None:
             break
 
         if event.kind == "delete":
-            handle_delete_event(state, event.path)
+            schedule_delete(state, event.path)
             continue
 
         schedule_file(state, event.path, event.kind)
@@ -806,9 +824,6 @@ def process_file(state: WatcherState, file_path: str) -> None:
     try:
         stat_result = os.stat(file_path)
     except FileNotFoundError:
-        with state.lock:
-            state.pending_files.pop(file_path, None)
-            state.in_progress_files.discard(file_path)
         handle_delete_event(state, file_path)
         return
 
@@ -909,7 +924,24 @@ def collect_completed_tasks(state: WatcherState) -> None:
             print(f"Worker crashed for {file_path}: {exc}")
             with state.lock:
                 state.pending_files.pop(file_path, None)
+                state.pending_deletes.discard(file_path)
                 state.in_progress_files.discard(file_path)
+
+
+def process_pending_deletes(state: WatcherState, executor: ThreadPoolExecutor) -> None:
+    with state.lock:
+        ready_paths = sorted(
+            file_path
+            for file_path in state.pending_deletes
+            if file_path not in state.in_progress_files
+        )
+
+        for file_path in ready_paths:
+            if len(state.running_tasks) >= INDEX_WORKERS:
+                break
+            state.in_progress_files.add(file_path)
+            future = executor.submit(handle_delete_event, state, file_path)
+            state.running_tasks[future] = file_path
 
 
 def process_stable_files(state: WatcherState, executor: ThreadPoolExecutor) -> None:
@@ -929,10 +961,7 @@ def process_stable_files(state: WatcherState, executor: ThreadPoolExecutor) -> N
         try:
             stat_result = os.stat(file_path)
         except FileNotFoundError:
-            with state.lock:
-                state.pending_files.pop(file_path, None)
-                state.in_progress_files.discard(file_path)
-            handle_delete_event(state, file_path)
+            schedule_delete(state, file_path)
             continue
 
         signature = (stat_result.st_size, stat_result.st_mtime_ns)
@@ -978,7 +1007,12 @@ def log_queue_completion_once(state: WatcherState) -> None:
     # are now atomic, preventing a spurious "queue complete" log if a worker
     # finishes between two separate acquisitions.
     with state.lock:
-        has_work = bool(state.pending_files or state.in_progress_files or state.running_tasks)
+        has_work = bool(
+            state.pending_files
+            or state.pending_deletes
+            or state.in_progress_files
+            or state.running_tasks
+        )
         if has_work:
             state.queue_complete_logged = False
             return
@@ -1015,6 +1049,7 @@ def start_watcher() -> None:
         while True:
             drain_event_queue(state)
             collect_completed_tasks(state)
+            process_pending_deletes(state, executor)
             process_stable_files(state, executor)
 
             now = time.time()

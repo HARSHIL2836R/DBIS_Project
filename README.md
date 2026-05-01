@@ -1,21 +1,107 @@
-The project forms a large part of the course (24% by weight). As announced, you should have formed teams of 4 members by now. Now each team should get started with the next phase of project, with the first submission being a formal document containing the name of the project, names of the team members and describing the details of the project that your team wants to accomplish. The document should also include some initial high-level ideas about the implementation.  The details/ideas part of the document should be 1 to 2 pages.
+# 📊 Global Secondary Indices for Parquet-Based Data Lakes
 
-On a separate note, each team is free to use, and also encouraged to use, GenAI tools and LLMs. But, any use of these tools should be explicitly made clear in the report. The report should also clearly outline the different parts of the project that have benefitted due to the use of these tools. You should submit a full log of the prompts you used to create the project code and other artifacts. Further, each member of the team should understand the code that the team submits and should be prepared to explain all the details of the project during the demo.
+> **Team:** Kunj Bhesaniya (23B0995), Dhruvraj Merchant (23B1041), Dipen Sojitra (23B0913), Harshil Solanki (23B1016)  
+> **Course:** CS349 - Database and Information Systems Lab
 
-There will be two phases to the project after the submission of the project outline. 
+---
 
-The first checkpoint which will be due in the week of 6th April to 10th April, will require your team to show your progress up to that point, with
+## 🎯 Project Overview
 
-A short report describing what all you have done (including system design documentation, code, prompts and logs if you used GenAI tools/LLMS etc), and
+This project implements **Global Secondary Indices (GSI)** for Parquet-based data lakes in PostgreSQL. Traditional selective queries on data lakes suffer from significant I/O overhead as databases must scan metadata footers of every Parquet file. Our solution introduces indexed column lookups to dramatically reduce query execution time.
 
-A demo/code walk through
+### 🚀 Key Achievement
+**~7.7x speedup** on selective queries using GSI optimization (2461ms → 318ms)
 
-The final project submission will be due a few days after the end of your endsem exams although you can submit it earlier also.  You will have to submit a full report, and do a demo/code walkthrough.
+---
 
-The percentage breakup of marks for this project are as follows: The project outline which your team will submit now will be worth 5%, the first checkpoint will be worth 15% and the final submission including the demo will be worth 80% marks.
+## 🏗️ Architecture
 
-Project Suggestions: [Sheet link](https://docs.google.com/spreadsheets/d/17ydn_P8w1HNvL46jceUBVjMp4oNc3FRuq7csnmtBA-g/edit?usp=sharing)
+### 1. **Data Generation Pipeline** (`/data/generate.py`)
+- Generates test datasets in Parquet format (Small: ~500MB, Medium: ~2GB, Large: ~10GB)
+- Creates three main tables: Customers, Products, Transactions
+- Supports both **Generate** and **Append** modes for incremental data
+- CLI-driven with customizable rows per file and partitioning
 
+### 2. **Parquet File Extraction** (`/watcher/extractor.py`)
+- Extracts indexed columns from Parquet files without full file loading
+- Processes data in row groups for memory efficiency
+- Outputs value → row group ID mappings for GSI posting generation
 
-sudo mount --bind /home/kunj/Desktop/DBIS-lab/DBIS_Project/data/data_lake /tmp/data_lake
+### 3. **Metadata Watcher Process** (`/watcher/watcher_daemon.py`)
+Maintains GSI indices through four key operations:
+- **Initialization:** Scans existing files and builds in-memory mappings
+- **New Files:** Monitors for stable files, extracts indices in parallel
+- **Deleted Files:** Removes stale postings from GSI tables
+- **Periodic Refresh:** Detects new indices and syncs metadata
+
+**Metadata Tables:**
+- `gsi_registry` - Index definitions and status
+- `gsi_file_catalog` - File metadata and activation states  
+- `gsi_index_file_state` - Per-file index state tracking
+
+### 4. **Foreign Data Wrapper Extension** (`/parquet_fdw/`)
+Extended PostgreSQL's `parquet_fdw` with GSI integration:
+- **Plan State:** Carries GSI metadata through query planning
+- **Cost Estimation:** Uses `pg_statistic` for accurate row-group selectivity
+- **Query Optimization:** Registers GSI access paths alongside full scans
+- **Execution:** Resolves index at runtime, reads only targeted files/row groups
+
+---
+
+## 📊 Performance Results
+
+### Query: Point lookup on customer_id
+```sql
+SELECT * FROM transactions WHERE customer_id = 'ae99a5bf52d91233eaf603b605111ee0'
+```
+
+| Metric | Without GSI | With GSI | Improvement |
+|--------|------------|----------|------------|
+| Execution Time | 2,461 ms | 318 ms | **7.7x faster** |
+| Rows Filtered | 3,333,329 | 366,662 | **89% reduction** |
+| Planning Time | 3.5 ms | 3.8 ms | Negligible |
+
+---
+
+## 🛠️ Tech Stack
+
+- **Database:** PostgreSQL with extended `parquet_fdw`
+- **Data Format:** Apache Parquet (via Arrow)
+- **Languages:** C++ (FDW), Python (watcher, data generation)
+- **Monitoring:** File system watchers with multi-threaded processing
+
+---
+
+## 📁 Project Structure
+
+```
+├── data/                    # Data generation scripts
+├── parquet_extraction_engine/  # C++ Parquet reader
+├── parquet_fdw/            # Extended FDW with GSI support
+├── watcher/                # Metadata watcher daemon
+├── test/                   # SQL tests and test data
+└── report.tex              # Detailed technical report
+```
+
+---
+
+## 🤖 GenAI Tool Usage
+
+- **VS Code Copilot:** Enhanced data generation CLI with file append operations
+- **ChatGPT Codex:** Generated complete watcher pipeline with case handling
+- **Prompt-based FDW Integration:** Refined PostgreSQL cost estimation and selectivity calculations
+
+---
+
+## 📖 Documentation
+
+See `report.tex` for comprehensive technical details including:
+- Detailed motivation and design rationale
+- Full pipeline architecture and state transitions
+- FDW callback modifications and implementation details
+- Complete performance analysis and benchmarks
+
+---
+
+**Repository:** [GitHub](https://github.com/HARSHIL2836R/DBIS_Project.git)
 

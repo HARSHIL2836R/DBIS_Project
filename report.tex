@@ -1,0 +1,194 @@
+\documentclass[11pt, a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage{geometry}
+\geometry{margin=0.5in}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\title{\textbf{Global Secondary Indices for \\ Parquet-Based Data Lakes}}
+\author{ Kunj Bhesaniya (23B0995) , Dhruvraj Merchant (23B1041), \\ Dipen Sojitra (23B0913), Harshil Solanki (23B1016)\\GitHub Repo: \url{https://github.com/HARSHIL2836R/DBIS_Project.git}}
+
+\date{}
+\begin{document}
+\maketitle
+
+\section{Motivation}
+Data lakes typically store massive datasets as collections of files, most commonly in the compressed, columnar Parquet format. While Parquet is highly optimized for broad analytical workloads and full-column scans, it struggles with highly selective queries (e.g., point lookups for a specific \texttt{customer\_id}). To resolve such queries, a database engine must conventionally open and read the metadata footers of every Parquet file in the data lake, resulting in significant I/O overhead.
+
+\section{Data Generation}
+\begin{itemize}
+    \item We use the script \texttt{/data/generate.py} to generate data (in Parquet format) for our data lake. The data lake consists of three main tables: Customers, Products, and Transactions.
+\item The transactions table is partitioned by month.
+\item The script generates a dataset of varying size: Small ($\sim$500 MB), Medium ($\sim$2GB), and Large ($\sim$10GB) based on the command-line argument provided to the script.
+\item The script operates in two modes according to the command line argument given
+\begin{enumerate}
+    \item \textbf{Generate}: In this mode, the script deletes all the older data and generates completely new data.
+    \item \textbf{Append}: In this mode, the script appends new data to the older data and refreshes the corresponding table in the database using psycopg2
+\end{enumerate}
+% \item There are also options for skewing the data that we are generating:  \texttt{--month-skew}, \texttt{--file-skew}, \texttt{--value-skew}, \texttt{--id-view} 
+% These skew values decide how unevenly the data is distributed across the files (0 skew means uniform, higher skew means more rows in fewer files)
+% \item There are some other command line options for the following
+% \begin{enumerate}
+%     \item Choose transaction partitioning using \texttt{--tx-partition} (\texttt{month}, \texttt{year}, or \texttt{none})
+%     \item Append new files using \texttt{--add-files}
+%     \item Select the target table to which new files should be added via \texttt{--add-table}
+%     \item Control rows per file using \texttt{--add-rows-per-file}
+% \end{enumerate}
+We are using this CLI only for appending new data; when generating, we are just using the small, medium, and large configurations.
+\end{itemize}
+\subsection{GenAI Usage:}
+Prompt Used:
+\\
+``I had written the code for generating the dataset in generate.py add some command line arguments to take the add no of files, in which table to add this file, rows per file, and for partitioning the directory also in the starter.sql file we had made a function to refresh the database use this function here in the append function that I had written to refresh the database whenever I add new files in append mode using the cli"
+\\
+I fed this prompt into VS Code Copilot to modify my existing generate.py code.
+
+\section{Parquet File Extraction}
+The script \texttt{/watcher/extractor.py} is used to extract selected columns from a Parquet file without loading the full file into memory. It reads only the required columns and processes the data in row groups, improving efficiency and reducing memory usage. It outputs a dictionary containing the value and a list of row\_group\_ids where it appears.
+
+
+\section{Watcher Process}
+\subsection{Watcher Metadata Tables}
+We require 3 tables to store all the metadatas for global secondary indexing \\
+\textbf{gsi\_registry: } Stores the index name, metadata of the column to be indexed and the table from which we index the column and status of this index('building', 'ready', 'dropped'). We insert the indices we want here.\\
+\textbf{gsi\_file\_catalog: } Maps file metadata to file id for parqut files. Also has an is\_active column.\\
+\textbf{gsi\_index\_file\_state: } Stores state of the index in a particular file. Possible states: {'pending', 'indexing', 'indexed', 'failed', 'deleted'}\\
+\noindent A representative snapshot for the index \texttt{gsi\_customers\_age} is shown below.
+
+
+\begin{table}[h]
+\centering
+\footnotesize
+\renewcommand{\arraystretch}{1.05}
+\begin{tabular}{|l|p{11.5cm}|}
+\hline
+\textbf{Table} & \textbf{Example Row} \\
+\hline
+\texttt{gsi\_registry} &
+\texttt{(gsi\_customers\_age, customers\_oid, customers, age, int4, gsi\_customers\_age, /tmp/data\_lake/customers, ready)} \\
+\hline
+\texttt{gsi\_file\_catalog} &
+\texttt{(17, customers, /tmp/data\_lake/customers/customers\_chunk\_0000.parquet, 6081743, 2026-05-01 10:30, true)} \\
+\hline
+\texttt{gsi\_index\_file\_state} &
+\texttt{(gsi\_customers\_age, 17, indexed, 2026-05-01 10:32, NULL)} \\
+\hline
+\texttt{gsi\_customers\_age} &
+\texttt{(30, 17, \{0,2\})} \\
+\hline
+\end{tabular}
+\end{table}
+
+
+\subsection{Watcher Pipeline}
+The watcher maintains the GSI entries for parquet files. There are 4 possible cases it can encounter.
+\subsubsection*{1. Watcher Initialization}
+When the watcher starts, it verifies if metadata tables exist and load all index definitions from \texttt{gsi\_registry}.It then builds an in-memory mapping from parquet root files to indexed columns, and begins monitoring those directories. After this, it scans over the existing parquet files and compares them with the entries in \texttt{gsi\_file\_catalog}. Any new or modified files are marked as pending. When the file is scheduled for processing mark it as indexing. Execute extractor on this file delete old postings for this file and insert new postings into GSI table. Mark file state as \texttt{indexed} in \texttt{gsi\_file\_catalog}.
+After there are no active files left to index in \texttt{gsi\_file\_catalog} mark the index as \texttt{ready} in \texttt{gsi\_registry}.
+
+\subsubsection*{2. Handling a New File}
+When a parquet file is created or moved, the watcher first waits until the file becomes stable, i.e.\ its size and modification time stop changing. It then updates the file metadata in \texttt{gsi\_file\_catalog} and changes the corresponding entry in \texttt{gsi\_index\_file\_state} to \texttt{pending}. When the file is scheduled for processing mark it as indexing. Execute extractor on this file delete old postings for this file and insert new postings into GSI table. Mark file state as \texttt{indexed} in \texttt{gsi\_file\_catalog}.
+
+\emph{Once the file status is updated to pending, we initiate multi-threading to execute the extractor logic in parallel. This ensures concurrent processing for faster GSI posting generation.}
+\subsubsection*{3. Handling a Deleted File}
+When a parquet file is deleted, the watcher marks the file as inactive in \texttt{gsi\_file\_catalog}. It then removes all postings of that file from the physical GSI table and updates the related row in \texttt{gsi\_index\_file\_state} to \texttt{deleted}.
+
+\subsubsection*{4. Periodic Refresh}
+The watcher also periodically refreshes \texttt{gsi\_registry} to check if any new indexes are added or not. This helps recover from missed events, detect changed files, and keep the metadata and physical GSI tables consistent with the actual parquet data stored in the data lake.
+
+\subsection{AI Declaration: } Watcher python script was generated by ChatGPT's Codex. I explained this complete pipeline in detail with instructions on how to handle various cases via a series of prompts and scenarios to Codex which then modified the files in the directory to implement this pipeline.
+
+\section{Foreign Data Wrapper}
+We extended the source code of \texttt{parquet\_fdw} (\url{https://github.com/adjust/parquet_fdw}), which already provides a Parquet file reader that opens Parquet files through Apache Arrow, maps Parquet columns to PostgreSQL tuple attributes, and converts Arrow values into Postgres \texttt{Datum}s. Our modifications are confined to \texttt{parquet\_impl.cpp}, which implements the core FDW callback handler that PostgreSQL invokes during query planning and execution.
+
+\subsection{Plan State Extensions}
+We extended \texttt{ParquetFdwPlanState} with four new fields to carry GSI-related information across the planning callbacks. \texttt{is\_gsi} is a boolean flag indicating whether the GSI path was chosen by the planner. \texttt{gsi\_usable} is set to \texttt{true} during \texttt{parquetGetForeignRelSize} if at least one indexed column appears in a WHERE clause equality predicate. \texttt{usable\_gsi\_attrs} holds a list of \texttt{(index\_table\_name, attnum)} pairs for every GSI-eligible column found in \texttt{gsi\_registry}. Finally, \texttt{gsi\_filenames} and \texttt{gsi\_rowgroups} store the file paths and row-group ID arrays resolved from the index at execution time, replacing the default full-scan file list.
+
+\subsection{Modified Callbacks}
+
+\begin{itemize}
+
+\item \textbf{parquetGetForeignRelSize:} The first planning hook PostgreSQL calls. We
+added a GSI eligibility check that connects via SPI and queries \texttt{gsi\_registry}
+for all index definitions whose \texttt{foreigntable\_oid} matches the foreign table
+being planned. For each index found, it calls \texttt{extract\_gsi\_qual} on the
+flattened clause list to test whether a supported comparison predicate
+(\texttt{=}, \texttt{<}, \texttt{<=}, \texttt{>}, \texttt{>=}) referencing the indexed
+column is present. If a match is found, \texttt{gsi\_usable} is set to \texttt{true}
+and the corresponding \texttt{(index\_table\_name, attnum)} pair is appended to
+\texttt{usable\_gsi\_attrs}.
+
+\item \textbf{parquetGetForeignPaths:} If \texttt{gsi\_usable} is \texttt{true}, this
+callback registers an additional access path for the GSI. Overall selectivity is
+computed as \texttt{baserel->rows / baserel->tuples}. Row-group selectivity is then
+estimated using a helper \texttt{get\_column\_ndistinct\_from\_stats} that reads
+\texttt{pg\_statistic}: if a distinct-value count \texttt{ndistinct} is available,
+\texttt{rg\_selectivity = selectivity / ndistinct}; otherwise we fall back to
+\texttt{sqrt(selectivity)}. The GSI startup cost adds
+\texttt{seq\_page\_cost * random\_page\_cost * 2} to the base startup cost (we were not able to estimate further using sequential cost),, and the
+run cost is scaled by \texttt{rg\_selectivity}. A parallel GSI partial path is also
+registered when \texttt{baserel->consider\_parallel > 0}, dividing the run cost
+across \texttt{max\_parallel\_workers\_per\_gather + 1} workers.
+
+\item \textbf{parquetGetForeignPlan:} Serialises the chosen \texttt{ParquetFdwPlanState} into a flat PostgreSQL \texttt{List} of \texttt{Node}s, as required for plan caching. In addition to the standard fields, we append \texttt{is\_gsi} as an \texttt{Integer} node and \texttt{usable\_gsi\_attrs} as a nested list. When \texttt{is\_gsi} is set, the GSI-resolved filename and row-group lists are substituted in place of the default full-scan ones.
+
+\item \textbf{resolve\_gsi\_targets (helper):} Called at execution time, this function extracts the filter predicate for the indexed column from the plan's \texttt{qual} list using \texttt{extract\_gsi\_qual}, which normalises both \texttt{Var op Const} and \texttt{Const op Var} forms and maps the operator OID to a SQL comparison string. It then issues a parameterised SPI query joining the index table against \texttt{gsi\_file\_catalog} to retrieve matching file paths and \texttt{rowgroup\_ids} integer arrays. Results are decoded via \texttt{deconstruct\_array}, deduplicated, and written back into \texttt{fdw\_private} with correct memory-context switching so that the resolved lists survive beyond the SPI call.
+
+\item \textbf{parquetBeginForeignScan:} After unpacking \texttt{fdw\_private}, this callback checks whether \texttt{is\_gsi} is set and \texttt{usable\_gsi\_attrs} is non-empty. If so, it invokes \texttt{resolve\_gsi\_targets} (timed with \texttt{std::chrono} for diagnostics) to obtain the GSI-filtered file and row-group lists, which replace the default full file list before the \texttt{ParquetFdwExecutionState} is constructed. The Arrow reader then opens only the targeted Parquet files and decodes only the identified row groups. If resolution fails for any reason, the scan falls back to a full scan with a warning rather than aborting.
+
+\end{itemize}
+
+\subsection{GenAI Usage}
+Prompt used:
+\\
+``I am building a Global Secondary Index (GSI) for a parquet\_fdw foreign table in PostgreSQL. I have a \texttt{ParquetFdwPlanState} that already carries \texttt{gsi\_usable}, \texttt{usable\_gsi\_attrs}, \texttt{matched\_rows}, and \texttt{tuples} from the RelSize hook. In \texttt{parquetGetForeignPaths}, I want to register a new ForeignScan path for the GSI. Explain how PostgreSQL cost estimation works for FDW paths (startup\_cost, run\_cost, random\_page\_cost), and show me how to derive a row-group selectivity from \texttt{pg\_statistic} n\_distinct values so I can scale the run cost correctly for an equality predicate on the indexed column.''
+\\
+We used this prompt to understand how to integrate \texttt{get\_column\_ndistinct\_from\_stats} with the planner's selectivity and to structure the GSI startup/run cost formula. We then manually validated and applied the changes.
+
+\section{Query Performance Comparison: Without vs With GSI}
+
+\subsection{Query Used}
+\begin{verbatim}
+EXPLAIN ANALYZE 
+SELECT * 
+FROM public.transactions
+WHERE customer_id = `ae99a5bf52d91233eaf603b605111ee0';
+\end{verbatim}
+
+\subsection{Query Plan Without GSI}
+\begin{verbatim}
+Gather  (cost=1000.00..39333.33 rows=50000 width=245) 
+(actual time=130.556..2460.608 rows=13 loops=1)
+  Workers Planned: 2
+  Workers Launched: 2
+  ->  Parallel Foreign Scan on transactions  
+      (cost=0.00..33333.33 rows=16667 width=245) 
+      (actual time=701.044..2435.119 rows=4 loops=3)
+        Filter: ((customer_id)::text = `ae99a5bf52d91233eaf603b605111ee0'::text)
+        Rows Removed by Filter: 3333329
+        Reader: Multifile
+
+Planning Time: 3.527 ms
+Execution Time: 2461.735 ms
+\end{verbatim}
+
+\subsection{Query Plan With GSI}
+\begin{verbatim}
+Gather  (cost=1008.00..12841.33 rows=50000 width=245) 
+(actual time=57.577..318.011 rows=13 loops=1)
+  Workers Planned: 2
+  Workers Launched: 2
+  ->  Parallel Foreign Scan on transactions  
+      (cost=8.00..6841.33 rows=16667 width=245) 
+      (actual time=52.341..277.669 rows=4 loops=3)
+        Filter: ((customer_id)::text = `ae99a5bf52d91233eaf603b605111ee0'::text)
+        Rows Removed by Filter: 366662
+        Global Secondary Index: Active (B+ Tree Filter)
+        Reader: Multifile
+
+Planning Time: 3.843 ms
+Execution Time: 318.543 ms
+\end{verbatim}
+
+\end{document}

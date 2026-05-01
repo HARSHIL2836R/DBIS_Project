@@ -31,6 +31,7 @@ extern "C" {
 #include "access/reloptions.h"
 #include "access/sysattr.h"
 #include "catalog/pg_foreign_table.h"
+#include "catalog/pg_class.h"
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
 #include "commands/explain.h"
@@ -203,6 +204,34 @@ static double get_column_ndistinct_from_stats(PlannerInfo *root, Oid relid, Attr
 #endif
   
   return ndistinct;
+}
+
+static double get_relation_reltuples(Oid relid) {
+  double reltuples = -1.0;
+  HeapTuple classtuple = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+
+  if (HeapTupleIsValid(classtuple)) {
+    Form_pg_class classform = (Form_pg_class)GETSTRUCT(classtuple);
+
+    reltuples = classform->reltuples;
+    ReleaseSysCache(classtuple);
+  }
+
+  return reltuples;
+}
+
+static double get_relation_relpages(Oid relid) {
+  double relpages = -1.0;
+  HeapTuple classtuple = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));
+
+  if (HeapTupleIsValid(classtuple)) {
+    Form_pg_class classform = (Form_pg_class)GETSTRUCT(classtuple);
+
+    relpages = classform->relpages;
+    ReleaseSysCache(classtuple);
+  }
+
+  return relpages;
 }
 
 
@@ -1442,6 +1471,13 @@ extern "C" void parquetGetForeignPaths(PlannerInfo *root, RelOptInfo *baserel,
     RangeTblEntry *gsi_rte = root->simple_rte_array[baserel->relid];
     Oid gsi_relid = gsi_rte->relid;
     double gsi_rg_selectivity = 1.0;
+    double gsi_index_tuples = 1.0;
+    double gsi_reltuples = get_relation_reltuples(gsi_relid);
+    double gsi_relpages = get_relation_relpages(gsi_relid);
+    double gsi_pages_fetched = 1.0;
+
+    if (gsi_reltuples > 0)
+      gsi_index_tuples = gsi_reltuples;
 
     if (fdw_private->usable_gsi_attrs &&
         list_length(fdw_private->usable_gsi_attrs) > 0) {
@@ -1450,27 +1486,50 @@ extern "C" void parquetGetForeignPaths(PlannerInfo *root, RelOptInfo *baserel,
       double ndistinct =
           get_column_ndistinct_from_stats(root, gsi_relid, index_attnum);
 
-      if (ndistinct > 0)
+      if (ndistinct > 0) {
         gsi_rg_selectivity = fmin(1.0, gsi_selectivity / ndistinct);
-      else
+      } else {
         gsi_rg_selectivity = sqrt(gsi_selectivity);
-    } else {
-      gsi_rg_selectivity = sqrt(gsi_selectivity);
+      }
     }
+
+    if (gsi_index_tuples <= 0)
+      gsi_index_tuples = fmax(1.0, baserel->tuples);
+
+    if (gsi_rg_selectivity == 1.0)
+      gsi_rg_selectivity = sqrt(gsi_selectivity);
+
+    if (gsi_relpages > 0 && gsi_reltuples > 0) {
+      double tuples_per_page = gsi_reltuples / gsi_relpages;
+
+      if (tuples_per_page > 0)
+        gsi_pages_fetched = ceil(gsi_index_tuples / tuples_per_page);
+      else
+        gsi_pages_fetched = gsi_relpages;
+    } else if (gsi_relpages > 0) {
+      gsi_pages_fetched = ceil(gsi_relpages * gsi_rg_selectivity);
+    }
+
+    if (gsi_pages_fetched < 1.0)
+      gsi_pages_fetched = 1.0;
+    if (gsi_relpages > 0 && gsi_pages_fetched > gsi_relpages)
+      gsi_pages_fetched = gsi_relpages;
 
     if (gsi_rg_selectivity > 1.0)
       gsi_rg_selectivity = 1.0;
     if (gsi_rg_selectivity < gsi_selectivity)
       gsi_rg_selectivity = gsi_selectivity;
 
-    Cost gsi_startup_cost = startup_cost + seq_page_cost * random_page_cost*2;
+    Cost gsi_startup_cost = startup_cost + gsi_pages_fetched * seq_page_cost +
+                            ceil(LOG2(gsi_index_tuples)) * cpu_operator_cost;
     Cost gsi_total_cost = gsi_startup_cost + run_cost * gsi_rg_selectivity;
 
     elog(DEBUG1,
          "Parquet FDW: GSI path cost estimation - startup: %f, total: %f "
-         "(base_total: %f, gsi_selectivity: %f, rg_selectivity: %f)",
+         "(base_total: %f, gsi_selectivity: %f, rg_selectivity: %f, "
+         "index_tuples: %f, pages_fetched: %f)",
          gsi_startup_cost, gsi_total_cost, total_cost, gsi_selectivity,
-         gsi_rg_selectivity);
+         gsi_rg_selectivity, gsi_index_tuples, gsi_pages_fetched);
 
     double gsi_rows = baserel->rows;
 

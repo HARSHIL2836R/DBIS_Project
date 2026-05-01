@@ -1,6 +1,6 @@
 #!/bin/bash
 
-DIR2="parquet_fdw"
+DIR2="modified_parquet_fdw"
 DIR1="org_repo"
 OUTDIR="diff_files"
 

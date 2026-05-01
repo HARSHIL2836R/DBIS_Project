@@ -1,7 +1,7 @@
-diff --git a/org_repo/src/parquet_impl.cpp b/parquet_fdw/src/parquet_impl.cpp
+diff --git a/org_repo/src/parquet_impl.cpp b/modified_parquet_fdw/src/parquet_impl.cpp
 index 20a5695..6c64c31 100755
 --- a/org_repo/src/parquet_impl.cpp
-+++ b/parquet_fdw/src/parquet_impl.cpp
++++ b/modified_parquet_fdw/src/parquet_impl.cpp
 @@ -7,23 +7,24 @@
 #include <libgen.h>
 #endif

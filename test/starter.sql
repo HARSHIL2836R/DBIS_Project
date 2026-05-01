@@ -1,8 +1,22 @@
+-- Comments added using AI
+
+-- ============================================================================
+-- PARQUET_FDW EXTENSION AND SERVER SETUP
+-- ============================================================================
+-- Initialize the parquet_fdw extension which allows PostgreSQL to read
+-- Apache Parquet files from external data lakes as foreign tables
 CREATE EXTENSION IF NOT EXISTS parquet_fdw;
 
+-- Create a foreign data server that will be used to connect to parquet files
 CREATE SERVER IF NOT EXISTS parquet_srv
 FOREIGN DATA WRAPPER parquet_fdw;
 
+-- ============================================================================
+-- HELPER FUNCTION: Recursive Parquet File Discovery
+-- ============================================================================
+-- Purpose: Recursively find all .parquet files in a given directory
+-- and its subdirectories. Used to support nested data lake structures
+-- where parquet files may be organized in multiple levels of directories.
 CREATE OR REPLACE FUNCTION public.list_parquet_files_recursive_jsonb(args jsonb)
 RETURNS text[]
 LANGUAGE plpgsql
@@ -38,6 +52,12 @@ BEGIN
 END;
 $$;
 
+-- ============================================================================
+-- HELPER FUNCTION: Refresh Foreign Table File References
+-- ============================================================================
+-- Purpose: Updates a foreign table's file list when new parquet files are
+-- added to the data lake. Ensures the FDW always knows about all available
+-- files without manual intervention.
 CREATE OR REPLACE FUNCTION public.refresh_parquet_foreign_table_files(
     p_foreign_table regclass,
     p_args jsonb
@@ -78,6 +98,14 @@ BEGIN
 END;
 $$;
 
+-- ============================================================================
+-- INITIALIZE FOREIGN TABLES FROM PARQUET DATA LAKE
+-- ============================================================================
+-- This block creates three foreign tables that map to parquet files in the
+-- data lake. Each table represents a different data domain:
+-- - customers: Customer master data (ID, email, region, demographics, etc.)
+-- - products: Product catalog (ID, name, category, price, stock, etc.)
+-- - transactions: Orders/transactions (order ID, amounts, dates, status, etc.)
 DO $$
 BEGIN
     IF to_regclass('public.customers') IS NULL THEN
@@ -197,6 +225,14 @@ BEGIN
 END;
 $$;
 
+-- ============================================================================
+-- METADATA TABLES FOR GSI (GENERIC SECONDARY INDEX) MANAGEMENT
+-- ============================================================================
+-- These tables track the state and management of secondary indexes built
+-- on foreign table columns. GSIs enable fast lookups on specific columns
+-- from parquet files without scanning entire files.
+
+-- gsi_registry: Stores metadata about registered indexes (what to index)
 CREATE TABLE IF NOT EXISTS public.gsi_registry (
     index_name text PRIMARY KEY,
     foreigntable_oid oid NOT NULL,
@@ -214,6 +250,7 @@ CREATE TABLE IF NOT EXISTS public.gsi_registry (
 CREATE UNIQUE INDEX IF NOT EXISTS gsi_registry_table_column_key
 ON public.gsi_registry (foreigntable_oid, column_name);
 
+-- gsi_file_catalog: Tracks all parquet files in the data lake and their metadata
 CREATE TABLE IF NOT EXISTS public.gsi_file_catalog (
     file_id bigserial PRIMARY KEY,
     foreigntable_oid oid NOT NULL,
@@ -230,6 +267,8 @@ CREATE TABLE IF NOT EXISTS public.gsi_file_catalog (
 CREATE INDEX IF NOT EXISTS gsi_file_catalog_table_active_idx
 ON public.gsi_file_catalog (foreigntable_oid, is_active);
 
+-- gsi_index_file_state: Tracks the indexing status of each file for each index
+-- (which files have been indexed, which are pending, failed, etc.)
 CREATE TABLE IF NOT EXISTS public.gsi_index_file_state (
     index_name text NOT NULL REFERENCES public.gsi_registry(index_name) ON DELETE CASCADE,
     file_id bigint NOT NULL REFERENCES public.gsi_file_catalog(file_id) ON DELETE CASCADE,
@@ -245,6 +284,13 @@ DELETE from public.gsi_index_file_state;
 CREATE INDEX IF NOT EXISTS gsi_index_file_state_status_idx
 ON public.gsi_index_file_state (index_name, status);
 
+-- ============================================================================
+-- FUNCTION: Register a New Generic Secondary Index (GSI)
+-- ============================================================================
+-- Purpose: Creates a new secondary index on a specified column of a foreign
+-- table. The index will store unique values and their corresponding file IDs
+-- and row group IDs for efficient lookups. Registers the index in the GSI
+-- registry for tracking and maintenance.
 DROP FUNCTION IF EXISTS public.register_gsi(regclass, text, text, text);
 
 CREATE OR REPLACE FUNCTION public.register_gsi(
@@ -327,6 +373,13 @@ BEGIN
 END;
 $$;
 
+-- ============================================================================
+-- REGISTER SECONDARY INDEXES ON KEY COLUMNS
+-- ============================================================================
+-- Create GSI indexes on frequently-queried columns. These indexes will
+-- enable fast lookups and filtering on these columns instead of full scans.
+
+-- TEST 1: Index on customer age for demographic filtering
 SELECT public.register_gsi(
     'public.customers'::regclass,
     'gsi_customers_age',
@@ -334,6 +387,7 @@ SELECT public.register_gsi(
     '/tmp/data_lake/customers'
 );
 
+-- TEST 2: Index on customer_id in transactions for customer lookup
 SELECT public.register_gsi(
     'public.transactions' :: regclass,
     'gsi_transactions_customer_id',
@@ -341,6 +395,7 @@ SELECT public.register_gsi(
     '/tmp/data_lake/transactions'
 );
 
+-- TEST 3: Index on order_id in transactions for order lookup
 SELECT public.register_gsi(
     'public.transactions'::regclass,
     'gsi_transactions_order_id',
@@ -348,6 +403,7 @@ SELECT public.register_gsi(
     '/tmp/data_lake/transactions'
 );
 
+-- TEST 4: Index on product_id in transactions for product lookup
 SELECT public.register_gsi(
     'public.transactions'::regclass,
     'gsi_transactions_product_id',
@@ -355,16 +411,32 @@ SELECT public.register_gsi(
     '/tmp/data_lake/transactions'
 );
 
+-- ============================================================================
+-- VERIFY REGISTERED INDEXES
+-- ============================================================================
+-- Display all registered GSI indexes and their current status (should be 'building')
 SELECT index_name, table_name, column_name, status
 FROM public.gsi_registry
 ORDER BY index_name;
 
+-- ============================================================================
+-- PERFORMANCE TESTING: Query Execution Plans with EXPLAIN ANALYZE
+-- ============================================================================
+-- These queries test the effectiveness of the secondary indexes by showing
+-- the query execution plan and actual execution statistics.
+
+-- TEST 5: Query customers by age (using gsi_customers_age index)
+-- Expected: Should use the age index for faster filtering instead of full scan
 EXPLAIN ANALYZE SELECT * FROM public.customers WHERE age = 30;
 
+-- TEST 6: Query transactions by customer ID (using gsi_transactions_customer_id index)
+-- Expected: Should use the customer_id index to quickly find all orders for a customer
 EXPLAIN ANALYZE
 SELECT * FROM public.transactions
 WHERE customer_id = '21a6607b1790f22eba088795b6c54e57';
 
+-- TEST 7: Query transactions by order ID (using gsi_transactions_order_id index)
+-- Expected: Should use the order_id index to retrieve a specific order quickly
 EXPLAIN ANALYZE
 SELECT * FROM public.transactions
 WHERE order_id = '1f6f92afdb4baa8a09a733ebd0616fea';

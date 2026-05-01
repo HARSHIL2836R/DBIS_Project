@@ -1,0 +1,1 @@
+delete from gsi_registry cascade;

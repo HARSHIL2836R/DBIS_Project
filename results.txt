@@ -28,3 +28,7 @@ WHERE age = 20;
 
 with gsi = 105ms
 without gsi = 55ms
+
+
+sudo make PG_CONFIG=/usr/lib/postgresql/16/bin/pg_config install
+sudo mount --bind /home/dhruvraj/Desktop/DBMS/DBIS_Project/data/data_lake/ /tmp/data_lake/

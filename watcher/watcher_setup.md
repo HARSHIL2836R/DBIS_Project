@@ -4,7 +4,7 @@ This setup is for running `watcher_deamon.py` independently of the parquet extra
 
 ## Overview
 
-`watcher_deamon.py` continuously watches the configured data lake directory for `.parquet` file creations, moves, and deletions. When it detects a new or moved parquet file, it calls the external extractor binary, reads the generated coordinate output, and stores the result in PostgreSQL. It also removes stale index entries when a parquet file is deleted. The script initializes the `global_index` table and its B-tree index automatically when it starts. fileciteturn1file0
+`watcher_deamon.py` continuously watches the configured data lake directory for `.parquet` file creations, moves, and deletions. When it detects a new or moved parquet file, it calls the external extractor binary, reads the generated coordinate output, and stores the result in PostgreSQL. It also removes stale index entries when a parquet file is deleted. The script initializes the `global_index` table and its B-tree index automatically when it starts.
 
 ## Prerequisites
 
@@ -68,7 +68,7 @@ When the script starts, it will:
 - When a `.parquet` file is created, the watcher runs the extractor on it.
 - When a `.parquet` file is moved into the watched directory, the watcher processes it.
 - When a `.parquet` file is deleted, the watcher removes matching records from `global_index`.
-- Duplicate index entries are reduced by deleting old rows for the same `file_path` before inserting fresh results. fileciteturn1file0
+- Duplicate index entries are reduced by deleting old rows for the same `file_path` before inserting fresh results.
 
 ## Troubleshooting
 

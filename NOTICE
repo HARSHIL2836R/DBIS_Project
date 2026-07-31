@@ -1,0 +1,18 @@
+Global Secondary Indices for Parquet-Based Data Lakes
+Copyright 2026 Kunj Bhesaniya, Dhruvraj Merchant, Dipen Sojitra, Harshil Solanki
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+--------------------------------------------------------------------------
+Third-party code
+--------------------------------------------------------------------------
+
+modified_parquet_fdw/
+
+    Derived from parquet_fdw, Copyright (c) 2018-2019 adjust GmbH.
+    Distributed under its own permissive license; see
+    modified_parquet_fdw/LICENSE.md. That license governs this directory
+    and is NOT superseded by the Apache-2.0 license at the repository root.
+
+    This copy has been modified to add Global Secondary Index support to
+    the planner and executor paths.

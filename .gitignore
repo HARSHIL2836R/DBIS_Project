@@ -1,11 +1,28 @@
-dbis-env
-data/data_lake
-Checkpoint1/.vscode
-data/data_lake
-parquet_extraction_engine/build
-parquet_gsi_fdw/fdw_explanation.md
-data/read_parquet.py
-.gitignore
-/parquet_extraction_engine/comment.cpp
+# Environment / secrets
 *.env
-watcher/__pycache__/
+!*.env.example
+
+# Build artifacts
+*.o
+*.so
+*.deb
+build/
+parquet_extraction_engine/build/
+
+# Generated data (use data/generate.py instead)
+data/data_lake/
+data/read_parquet.py
+dbis-env/
+
+# Python
+__pycache__/
+*.pyc
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Submission archives
+submission/
+submission.zip

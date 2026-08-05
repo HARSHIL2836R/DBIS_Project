@@ -1,0 +1,23 @@
+{
+  "build_seconds": 72.924,
+  "files_indexed": 26,
+  "workers": 8,
+  "indexes": {
+    "gsi_customers_age": {
+      "postings_rows": 124,
+      "bytes": 81920
+    },
+    "gsi_transactions_customer_id": {
+      "postings_rows": 1635860,
+      "bytes": 333201408
+    },
+    "gsi_transactions_order_id": {
+      "postings_rows": 2000000,
+      "bytes": 407715840
+    },
+    "gsi_transactions_product_id": {
+      "postings_rows": 973428,
+      "bytes": 198942720
+    }
+  }
+}

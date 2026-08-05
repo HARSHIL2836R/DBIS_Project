@@ -1,0 +1,238 @@
+==============================================================================
+q1_order_id  (high cardinality)  arm=gsi_off
+value = '00225d9434f9720e7869a6971fa67640'
+==============================================================================
+Foreign Scan on transactions  (cost=0.00..20000.00 rows=1 width=153) (actual time=721.819..1626.011 rows=1 loops=1)
+  Filter: ((order_id)::text = '00225d9434f9720e7869a6971fa67640'::text)
+  Rows Removed by Filter: 1999999
+  Reader: Multifile
+  Row groups: 
+    transactions_chunk_0000.parquet: 1, 2
+    transactions_chunk_0001.parquet: 1, 2
+    transactions_chunk_0002.parquet: 1, 2
+    transactions_chunk_0003.parquet: 1, 2
+    transactions_chunk_0004.parquet: 1, 2
+    transactions_chunk_0005.parquet: 1, 2
+    transactions_chunk_0006.parquet: 1, 2
+    transactions_chunk_0007.parquet: 1, 2
+    transactions_chunk_0008.parquet: 1, 2
+    transactions_chunk_0009.parquet: 1, 2
+    transactions_chunk_0010.parquet: 1, 2
+    transactions_chunk_0011.parquet: 1, 2
+    transactions_chunk_0012.parquet: 1, 2
+    transactions_chunk_0013.parquet: 1, 2
+    transactions_chunk_0014.parquet: 1, 2
+    transactions_chunk_0015.parquet: 1, 2
+    transactions_chunk_0016.parquet: 1, 2
+    transactions_chunk_0017.parquet: 1, 2
+    transactions_chunk_0018.parquet: 1, 2
+    transactions_chunk_0019.parquet: 1, 2
+    transactions_chunk_0020.parquet: 1, 2
+    transactions_chunk_0021.parquet: 1, 2
+    transactions_chunk_0022.parquet: 1, 2
+    transactions_chunk_0023.parquet: 1, 2
+Planning Time: 1.910 ms
+Execution Time: 1627.020 ms
+
+==============================================================================
+q1_order_id  (high cardinality)  arm=gsi_on
+value = '00225d9434f9720e7869a6971fa67640'
+==============================================================================
+Foreign Scan on transactions  (cost=8.00..22.14 rows=1 width=153) (actual time=17.131..33.376 rows=1 loops=1)
+  Filter: ((order_id)::text = '00225d9434f9720e7869a6971fa67640'::text)
+  Rows Removed by Filter: 33332
+  Global Secondary Index: Active (B+ Tree Filter)
+  Reader: Single File
+  Row groups: 2
+Planning Time: 1.978 ms
+Execution Time: 33.655 ms
+
+PLAN DIFFERENCE
+  Global Secondary Index   off=None  on='Active (B+ Tree Filter)'
+  Reader                   off='Multifile'  on='Single File'
+  Rows removed by filter   off=1999999  on=33332
+  Row groups read          off=48  on=1
+
+==============================================================================
+q2_customer_id  (high cardinality)  arm=gsi_off
+value = 'b946cabd05a71cfc0d2f7e795bd88d94'
+==============================================================================
+Foreign Scan on transactions  (cost=0.00..20000.00 rows=11 width=153) (actual time=25.657..1638.872 rows=29 loops=1)
+  Filter: ((customer_id)::text = 'b946cabd05a71cfc0d2f7e795bd88d94'::text)
+  Rows Removed by Filter: 1999971
+  Reader: Multifile
+  Row groups: 
+    transactions_chunk_0000.parquet: 1, 2
+    transactions_chunk_0001.parquet: 1, 2
+    transactions_chunk_0002.parquet: 1, 2
+    transactions_chunk_0003.parquet: 1, 2
+    transactions_chunk_0004.parquet: 1, 2
+    transactions_chunk_0005.parquet: 1, 2
+    transactions_chunk_0006.parquet: 1, 2
+    transactions_chunk_0007.parquet: 1, 2
+    transactions_chunk_0008.parquet: 1, 2
+    transactions_chunk_0009.parquet: 1, 2
+    transactions_chunk_0010.parquet: 1, 2
+    transactions_chunk_0011.parquet: 1, 2
+    transactions_chunk_0012.parquet: 1, 2
+    transactions_chunk_0013.parquet: 1, 2
+    transactions_chunk_0014.parquet: 1, 2
+    transactions_chunk_0015.parquet: 1, 2
+    transactions_chunk_0016.parquet: 1, 2
+    transactions_chunk_0017.parquet: 1, 2
+    transactions_chunk_0018.parquet: 1, 2
+    transactions_chunk_0019.parquet: 1, 2
+    transactions_chunk_0020.parquet: 1, 2
+    transactions_chunk_0021.parquet: 1, 2
+    transactions_chunk_0022.parquet: 1, 2
+    transactions_chunk_0023.parquet: 1, 2
+Planning Time: 1.954 ms
+Execution Time: 1639.759 ms
+
+==============================================================================
+q2_customer_id  (high cardinality)  arm=gsi_on
+value = 'b946cabd05a71cfc0d2f7e795bd88d94'
+==============================================================================
+Foreign Scan on transactions  (cost=8.00..8.11 rows=11 width=153) (actual time=23.828..772.275 rows=29 loops=1)
+  Filter: ((customer_id)::text = 'b946cabd05a71cfc0d2f7e795bd88d94'::text)
+  Rows Removed by Filter: 949972
+  Global Secondary Index: Active (B+ Tree Filter)
+  Reader: Multifile
+  Row groups: 
+    transactions_chunk_0000.parquet: 1, 2
+    transactions_chunk_0002.parquet: 2
+    transactions_chunk_0003.parquet: 1, 2
+    transactions_chunk_0006.parquet: 1
+    transactions_chunk_0008.parquet: 1
+    transactions_chunk_0009.parquet: 1
+    transactions_chunk_0010.parquet: 2
+    transactions_chunk_0012.parquet: 2
+    transactions_chunk_0013.parquet: 1
+    transactions_chunk_0014.parquet: 2
+    transactions_chunk_0015.parquet: 1, 2
+    transactions_chunk_0016.parquet: 1
+    transactions_chunk_0018.parquet: 1, 2
+    transactions_chunk_0019.parquet: 1, 2
+    transactions_chunk_0021.parquet: 2
+    transactions_chunk_0022.parquet: 2
+    transactions_chunk_0023.parquet: 1, 2
+Planning Time: 2.216 ms
+Execution Time: 773.334 ms
+
+PLAN DIFFERENCE
+  Global Secondary Index   off=None  on='Active (B+ Tree Filter)'
+  Reader                   off='Multifile'  on='Multifile'
+  Rows removed by filter   off=1999971  on=949972
+  Row groups read          off=48  on=23
+
+==============================================================================
+q3_product_id  (high cardinality)  arm=gsi_off
+value = '850117185274e0ffa3edd55dfac7335f'
+==============================================================================
+Foreign Scan on transactions  (cost=0.00..20000.00 rows=41 width=153) (actual time=19.867..1666.411 rows=66 loops=1)
+  Filter: ((product_id)::text = '850117185274e0ffa3edd55dfac7335f'::text)
+  Rows Removed by Filter: 1999934
+  Reader: Multifile
+  Row groups: 
+    transactions_chunk_0000.parquet: 1, 2
+    transactions_chunk_0001.parquet: 1, 2
+    transactions_chunk_0002.parquet: 1, 2
+    transactions_chunk_0003.parquet: 1, 2
+    transactions_chunk_0004.parquet: 1, 2
+    transactions_chunk_0005.parquet: 1, 2
+    transactions_chunk_0006.parquet: 1, 2
+    transactions_chunk_0007.parquet: 1, 2
+    transactions_chunk_0008.parquet: 1, 2
+    transactions_chunk_0009.parquet: 1, 2
+    transactions_chunk_0010.parquet: 1, 2
+    transactions_chunk_0011.parquet: 1, 2
+    transactions_chunk_0012.parquet: 1, 2
+    transactions_chunk_0013.parquet: 1, 2
+    transactions_chunk_0014.parquet: 1, 2
+    transactions_chunk_0015.parquet: 1, 2
+    transactions_chunk_0016.parquet: 1, 2
+    transactions_chunk_0017.parquet: 1, 2
+    transactions_chunk_0018.parquet: 1, 2
+    transactions_chunk_0019.parquet: 1, 2
+    transactions_chunk_0020.parquet: 1, 2
+    transactions_chunk_0021.parquet: 1, 2
+    transactions_chunk_0022.parquet: 1, 2
+    transactions_chunk_0023.parquet: 1, 2
+Planning Time: 2.365 ms
+Execution Time: 1667.693 ms
+
+==============================================================================
+q3_product_id  (high cardinality)  arm=gsi_on
+value = '850117185274e0ffa3edd55dfac7335f'
+==============================================================================
+Foreign Scan on transactions  (cost=8.00..8.41 rows=41 width=153) (actual time=19.436..1313.604 rows=66 loops=1)
+  Filter: ((product_id)::text = '850117185274e0ffa3edd55dfac7335f'::text)
+  Rows Removed by Filter: 1599935
+  Global Secondary Index: Active (B+ Tree Filter)
+  Reader: Multifile
+  Row groups: 
+    transactions_chunk_0000.parquet: 1, 2
+    transactions_chunk_0002.parquet: 1, 2
+    transactions_chunk_0003.parquet: 1
+    transactions_chunk_0004.parquet: 1, 2
+    transactions_chunk_0005.parquet: 1, 2
+    transactions_chunk_0006.parquet: 1
+    transactions_chunk_0007.parquet: 1, 2
+    transactions_chunk_0008.parquet: 2
+    transactions_chunk_0009.parquet: 1, 2
+    transactions_chunk_0010.parquet: 1, 2
+    transactions_chunk_0011.parquet: 1, 2
+    transactions_chunk_0012.parquet: 1, 2
+    transactions_chunk_0013.parquet: 1
+    transactions_chunk_0014.parquet: 1, 2
+    transactions_chunk_0016.parquet: 1, 2
+    transactions_chunk_0017.parquet: 1, 2
+    transactions_chunk_0018.parquet: 1
+    transactions_chunk_0019.parquet: 1, 2
+    transactions_chunk_0020.parquet: 2
+    transactions_chunk_0021.parquet: 1, 2
+    transactions_chunk_0022.parquet: 1, 2
+    transactions_chunk_0023.parquet: 1, 2
+Planning Time: 2.130 ms
+Execution Time: 1314.845 ms
+
+PLAN DIFFERENCE
+  Global Secondary Index   off=None  on='Active (B+ Tree Filter)'
+  Reader                   off='Multifile'  on='Multifile'
+  Rows removed by filter   off=1999934  on=1599935
+  Row groups read          off=48  on=38
+
+==============================================================================
+q4_age  (low cardinality)  arm=gsi_off
+value = 30
+==============================================================================
+Foreign Scan on customers  (cost=0.00..2000.00 rows=3187 width=90) (actual time=7.744..137.501 rows=3246 loops=1)
+  Filter: (age = 30)
+  Rows Removed by Filter: 196754
+  Reader: Multifile
+  Row groups: 
+    customers_chunk_0000.parquet: 1, 2
+    customers_chunk_0001.parquet: 1, 2
+Planning Time: 0.424 ms
+Execution Time: 137.801 ms
+
+==============================================================================
+q4_age  (low cardinality)  arm=gsi_on
+value = 30
+==============================================================================
+Foreign Scan on customers  (cost=8.00..39.87 rows=3187 width=90) (actual time=7.418..124.756 rows=3246 loops=1)
+  Filter: (age = 30)
+  Rows Removed by Filter: 196754
+  Global Secondary Index: Active (B+ Tree Filter)
+  Reader: Multifile
+  Row groups: 
+    customers_chunk_0000.parquet: 1, 2
+    customers_chunk_0001.parquet: 1, 2
+Planning Time: 0.430 ms
+Execution Time: 125.075 ms
+
+PLAN DIFFERENCE
+  Global Secondary Index   off=None  on='Active (B+ Tree Filter)'
+  Reader                   off='Multifile'  on='Multifile'
+  Rows removed by filter   off=196754  on=196754
+  Row groups read          off=4  on=4

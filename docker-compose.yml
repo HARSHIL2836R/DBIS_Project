@@ -1,0 +1,38 @@
+services:
+  db:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: parquet-gsi:pg16
+    environment:
+      POSTGRES_PASSWORD: gsi
+      POSTGRES_DB: gsi
+      POSTGRES_USER: postgres
+      # Fixed so timings are comparable across machines. Documented in README.
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    command:
+      - postgres
+      - -c
+      - shared_buffers=1GB
+      - -c
+      - work_mem=64MB
+      - -c
+      - maintenance_work_mem=512MB
+      - -c
+      - max_parallel_workers_per_gather=0
+      - -c
+      - jit=off
+      - -c
+      - track_io_timing=on
+    volumes:
+      - ./:/work:rw
+      - lake:/tmp/data_lake
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d gsi"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+volumes:
+  lake:
+  pgdata:

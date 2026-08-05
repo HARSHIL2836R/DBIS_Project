@@ -1,0 +1,79 @@
+name: ci
+
+# Compile and schema-apply only. This workflow deliberately does NOT publish
+# timings: GitHub runners are shared, throttled, and vary run to run, so any
+# number produced here would be noise wearing a benchmark's clothes. Published
+# figures come from a real machine via ./run_bench.sh and are committed to
+# results/ alongside results/hardware.json.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-schema:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image (compiles parquet_fdw against pinned Arrow)
+        run: docker compose build
+
+      - name: Start PostgreSQL
+        run: |
+          docker compose up -d
+          for _ in $(seq 1 60); do
+            if docker compose exec -T db pg_isready -U postgres -d gsi; then exit 0; fi
+            sleep 2
+          done
+          echo "PostgreSQL did not become ready" >&2
+          docker compose logs db
+          exit 1
+
+      - name: Generate a tiny lake
+        # Smallest target the generator offers. CI is proving the schema applies
+        # and the extension loads, not measuring anything.
+        run: |
+          docker compose exec -T -w /work db python3 data/generate.py \
+            --target small --out /tmp/data_lake --seed 42 --tx-partition month
+
+      - name: Apply the benchmark schema
+        run: |
+          docker compose exec -T -w /work db \
+            psql -U postgres -d gsi -v ON_ERROR_STOP=1 -f bench/00_schema.sql
+
+      - name: Schema is idempotent (apply it a second time)
+        run: |
+          docker compose exec -T -w /work db \
+            psql -U postgres -d gsi -v ON_ERROR_STOP=1 -f bench/00_schema.sql
+
+      - name: Foreign tables are readable
+        run: |
+          docker compose exec -T db psql -U postgres -d gsi -v ON_ERROR_STOP=1 \
+            -c "SELECT count(*) FROM public.customers;" \
+            -c "SELECT count(*) FROM public.products;" \
+            -c "SELECT count(*) FROM public.transactions;"
+
+      - name: Build the indexes
+        run: docker compose exec -T -w /work db python3 bench/index_lake.py
+
+      - name: The A/B toggle must change the plan
+        # This is the gate that matters. If the two arms ever plan identically,
+        # the benchmark is measuring nothing and CI must go red.
+        run: docker compose exec -T -w /work db python3 bench/verify_ab.py
+
+      - name: Harness syntax check
+        run: |
+          docker compose exec -T -w /work db python3 -m compileall -q bench
+          bash -n run_bench.sh
+
+      - name: Container logs on failure
+        if: failure()
+        run: docker compose logs db
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
